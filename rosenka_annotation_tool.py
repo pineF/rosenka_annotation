@@ -12,10 +12,6 @@ from streamlit_image_coordinates import streamlit_image_coordinates
 # 設定
 # ============================================================
 
-DEFAULT_IMAGE_PATH = "/workspace/notebooks/rosenka_annotaion/kobe_chuo_stitched_trimming.png"
-DEFAULT_JSON_PATH = "/workspace/notebooks/rosenka_annotaion/ground_truth.json"
-
-
 # ブラウザ上で表示する最大サイズ
 MAX_DISPLAY_WIDTH = 1200
 MAX_DISPLAY_HEIGHT = 800
