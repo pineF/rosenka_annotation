@@ -12,6 +12,14 @@ def rerun_canvas() -> None:
     except StreamlitInvalidLayoutContextError:
         st.rerun()
 
+
+def canvas_signature(objects: list[dict]) -> tuple[object, ...]:
+    if not objects:
+        return (0, None, None)
+    last_obj = objects[-1]
+    return (len(objects), last_obj.get("left"), last_obj.get("top"))
+
+
 # ------------------------------------------------------------------------------
 # 1. ページ初期設定 & セッション状態の初期化
 # ------------------------------------------------------------------------------
@@ -33,6 +41,8 @@ if "last_canvas_object_signature" not in st.session_state:
     st.session_state.last_canvas_object_signature = None
 if "canvas_initial_drawing" not in st.session_state:
     st.session_state.canvas_initial_drawing = None
+if "ignore_next_canvas_event" not in st.session_state:
+    st.session_state.ignore_next_canvas_event = False
 
 st.title("📍 路線価アノテーションツール")
 
@@ -190,13 +200,11 @@ if uploaded_image is not None:
                 if canvas_result.json_data
                 else []
             )
-            if canvas_result.json_data and canvas_result.json_data.get("objects"):
+            if st.session_state.ignore_next_canvas_event:
+                st.session_state.ignore_next_canvas_event = False
+            elif canvas_result.json_data and canvas_result.json_data.get("objects"):
                 last_obj = canvas_objects[-1]
-                object_signature = (
-                    len(canvas_objects),
-                    last_obj.get("left"),
-                    last_obj.get("top"),
-                )
+                object_signature = canvas_signature(canvas_objects)
                 if (
                     object_signature
                     == st.session_state.last_canvas_object_signature
@@ -230,7 +238,10 @@ if uploaded_image is not None:
                         "version": "5.2.4",
                         "objects": canvas_objects[:-1],
                     }
-                    st.session_state.last_canvas_object_signature = None
+                    st.session_state.last_canvas_object_signature = (
+                        canvas_signature(canvas_objects[:-1])
+                    )
+                    st.session_state.ignore_next_canvas_event = True
                     rerun_canvas()
             with c_btn2:
                 if st.button("🗑️ すべてクリア"):
@@ -239,7 +250,10 @@ if uploaded_image is not None:
                         "version": "5.2.4",
                         "objects": [],
                     }
-                    st.session_state.last_canvas_object_signature = None
+                    st.session_state.last_canvas_object_signature = (
+                        canvas_signature([])
+                    )
+                    st.session_state.ignore_next_canvas_event = True
                     rerun_canvas()
 
             st.write(
@@ -422,6 +436,7 @@ if uploaded_image is not None:
                     "objects": [],
                 }
                 st.session_state.last_canvas_object_signature = None
+                st.session_state.ignore_next_canvas_event = True
                 # キャンバスを再生成するとスクロール位置が失われるため、
                 # 登録時は同じキャンバスを再利用する。
                 st.rerun()
