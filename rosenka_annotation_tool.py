@@ -22,6 +22,8 @@ if "json_load_warning" not in st.session_state:
     st.session_state.json_load_warning = None
 if "last_canvas_object_signature" not in st.session_state:
     st.session_state.last_canvas_object_signature = None
+if "canvas_initial_drawing" not in st.session_state:
+    st.session_state.canvas_initial_drawing = None
 
 st.title("📍 路線価アノテーションツール")
 
@@ -166,6 +168,7 @@ if uploaded_image is not None:
                     stroke_width=2,
                     stroke_color="#000000",
                     background_image=canvas_bg_resized,
+                    initial_drawing=st.session_state.canvas_initial_drawing,
                     update_streamlit=True,
                     height=disp_h,
                     width=disp_w,
@@ -214,24 +217,20 @@ if uploaded_image is not None:
                 if st.button("↩️ 1つ戻す（最後の点を削除）"):
                     if st.session_state.current_points:
                         st.session_state.current_points.pop()
-                    if canvas_objects:
-                        last_obj = canvas_objects[-1]
-                        st.session_state.last_canvas_object_signature = (
-                            len(canvas_objects),
-                            last_obj.get("left"),
-                            last_obj.get("top"),
-                        )
+                    st.session_state.canvas_initial_drawing = {
+                        "version": "5.2.4",
+                        "objects": canvas_objects[:-1],
+                    }
+                    st.session_state.last_canvas_object_signature = None
                     st.rerun(scope="fragment")
             with c_btn2:
                 if st.button("🗑️ すべてクリア"):
                     st.session_state.current_points = []
-                    if canvas_objects:
-                        last_obj = canvas_objects[-1]
-                        st.session_state.last_canvas_object_signature = (
-                            len(canvas_objects),
-                            last_obj.get("left"),
-                            last_obj.get("top"),
-                        )
+                    st.session_state.canvas_initial_drawing = {
+                        "version": "5.2.4",
+                        "objects": [],
+                    }
+                    st.session_state.last_canvas_object_signature = None
                     st.rerun(scope="fragment")
 
             st.write(
@@ -409,6 +408,11 @@ if uploaded_image is not None:
 
                 # 入力リセット
                 st.session_state.current_points = []
+                st.session_state.canvas_initial_drawing = {
+                    "version": "5.2.4",
+                    "objects": [],
+                }
+                st.session_state.last_canvas_object_signature = None
                 # キャンバスを再生成するとスクロール位置が失われるため、
                 # 登録時は同じキャンバスを再利用する。
                 st.rerun()
