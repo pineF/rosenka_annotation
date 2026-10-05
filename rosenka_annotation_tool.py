@@ -1,1049 +1,473 @@
-import streamlit as st
-from streamlit_drawable_canvas import st_canvas
-from PIL import Image
 import json
-import io
+import numpy as np
+import streamlit as st
+from PIL import Image, ImageDraw, ImageFont
+from streamlit_drawable_canvas import st_canvas
 
-
-# ============================================================
-# ページ設定
-# ============================================================
-
+# ------------------------------------------------------------------------------
+# 1. ページ初期設定 & セッション状態の初期化
+# ------------------------------------------------------------------------------
 st.set_page_config(
-    page_title="路線価アノテーションツール",
-    layout="wide"
+    page_title="路線価アノテーションツール", layout="wide", initial_sidebar_state="expanded"
 )
-
-st.title("路線価アノテーションツール")
-
-
-# ============================================================
-# Session State 初期化
-# ============================================================
 
 if "annotations" not in st.session_state:
-    st.session_state.annotations = []
-
+    st.session_state.annotations = []  # アノテーションリスト
 if "current_points" not in st.session_state:
-    st.session_state.current_points = []
-
+    st.session_state.current_points = []  # 現在描画中のポリライン（元画像座標系 [[x, y], ...]）
 if "editing_id" not in st.session_state:
-    st.session_state.editing_id = None
+    st.session_state.editing_id = None  # 修正中のアノテーションID
+if "next_id" not in st.session_state:
+    st.session_state.next_id = 1  # 新規アノテーションIDカウンタ
 
-if "edit_points" not in st.session_state:
-    st.session_state.edit_points = []
+st.title("📍 路線価アノテーションツール")
 
-if "last_canvas_count" not in st.session_state:
-    st.session_state.last_canvas_count = 0
+# ------------------------------------------------------------------------------
+# 2. サイドバー：画像・JSONのアップロード、拡大縮小、JSONダウンロード
+# ------------------------------------------------------------------------------
+st.sidebar.header("📁 ファイル操作 / 設定")
 
-if "image_name" not in st.session_state:
-    st.session_state.image_name = None
-
-if "image_width" not in st.session_state:
-    st.session_state.image_width = None
-
-if "image_height" not in st.session_state:
-    st.session_state.image_height = None
-
-if "loaded_image_key" not in st.session_state:
-    st.session_state.loaded_image_key = None
-
-
-# ============================================================
-# 定数
-# ============================================================
-
-SHAPE_OPTIONS = [
-    "六角形",
-    "楕円",
-    "八角形",
-    "正円",
-    "縦に潰れたひし形",
-    "横長の長方形",
-    "なし"
-]
-
-PATTERN_OPTIONS = [
-    "斜線",
-    "黒塗り",
-    "なし"
-]
-
-
-# ============================================================
 # 画像アップロード
-# ============================================================
-
-uploaded_file = st.file_uploader(
-    "路線価図をアップロードしてください",
-    type=["png", "jpg", "jpeg"]
+uploaded_image = st.sidebar.file_uploader(
+    "1. 路線価図画像をアップロード", type=["png", "jpg", "jpeg"]
 )
 
+# ズーム倍率設定（デフォルト 100%）
+zoom_percent = st.sidebar.slider(
+    "画像表示倍率 (%)", min_value=10, max_value=300, value=100, step=10
+)
+zoom_scale = zoom_percent / 100.0
 
-if uploaded_file is not None:
+st.sidebar.markdown("---")
 
-    image_bytes = uploaded_file.getvalue()
+# JSONの読み込み機能
+uploaded_json = st.sidebar.file_uploader("2. 既存JSONを読み込み", type=["json"])
+if uploaded_json is not None:
+    if st.sidebar.button("JSONデータを読み込んで復元"):
+        try:
+            data = json.load(uploaded_json)
+            loaded_annotations = data.get("annotations", [])
+            st.session_state.annotations = loaded_annotations
 
-    # ファイル内容を識別するためのキー
-    image_key = (
-        uploaded_file.name,
-        len(image_bytes)
-    )
+            # 次のIDの決定
+            if loaded_annotations:
+                max_id = max(ann.get("id", 0) for ann in loaded_annotations)
+                st.session_state.next_id = max_id + 1
+            else:
+                st.session_state.next_id = 1
 
-    # 新しい画像がアップロードされた場合
-    if st.session_state.loaded_image_key != image_key:
+            # 画像サイズのチェック
+            if uploaded_image is not None:
+                img_temp = Image.open(uploaded_image)
+                w_orig, h_orig = img_temp.size
+                if data.get("image_width") != w_orig or data.get(
+                    "image_height"
+                ) != h_orig:
+                    st.sidebar.warning(
+                        "⚠️ 警告: JSON内の画像サイズとアップロード中の画像サイズが異なります。"
+                    )
 
-        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+            st.sidebar.success(
+                f"JSONをロードしました。（{len(loaded_annotations)}件）"
+            )
+            st.rerun()
+        except Exception as e:
+            st.sidebar.error(f"JSON読み込みエラー: {e}")
 
-        st.session_state.image_name = uploaded_file.name
-        st.session_state.image_width = image.width
-        st.session_state.image_height = image.height
+st.sidebar.markdown("---")
 
-        st.session_state.loaded_image_key = image_key
+# 画像がロードされている場合のみ動作
+if uploaded_image is not None:
+    # 画像取得と元サイズ保持
+    image_original = Image.open(uploaded_image).convert("RGB")
+    orig_w, orig_h = image_original.size
+    image_name = uploaded_image.name
 
-        # 画像を変更した場合は現在の作業点をリセット
-        st.session_state.current_points = []
-        st.session_state.last_canvas_count = 0
-        st.session_state.editing_id = None
-        st.session_state.edit_points = []
+    # 表示用サイズ
+    disp_w = int(orig_w * zoom_scale)
+    disp_h = int(orig_h * zoom_scale)
 
-    else:
-        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    # --------------------------------------------------------------------------
+    # 3. Canvas背景画像の生成（既存アノテーションの「線描画」含む）
+    # --------------------------------------------------------------------------
+    # 元画像コピーに既存線を描画（元画像座標で高解像度描画）
+    canvas_bg_orig = image_original.copy()
+    draw = ImageDraw.Draw(canvas_bg_orig)
 
-else:
-    image = None
+    # フォント設定（簡易的なフォント）
+    try:
+        font = ImageFont.load_default()
+    except Exception:
+        font = None
 
+    for ann in st.session_state.annotations:
+        ann_id = ann["id"]
+        pts = [tuple(p) for p in ann["polyline"]]
 
-# ============================================================
-# 画像がアップロードされている場合
-# ============================================================
+        # 修正対象は「青線」、その他登録済みは「赤線」
+        if (
+            st.session_state.editing_id is not None
+            and ann_id == st.session_state.editing_id
+        ):
+            line_color = (0, 100, 255)  # 青
+            width = 5
+        else:
+            line_color = (255, 0, 0)  # 赤
+            width = 4
 
-if image is not None:
-
-    original_width = image.width
-    original_height = image.height
-
-    st.info(
-        f"画像サイズ：{original_width} × {original_height} px"
-    )
-
-    # ========================================================
-    # ズーム設定
-    # ========================================================
-
-    st.subheader("画像表示")
-
-    zoom = st.slider(
-        "拡大・縮小",
-        min_value=0.25,
-        max_value=2.0,
-        value=1.0,
-        step=0.25
-    )
-
-    # 表示用画像サイズ
-    canvas_width = max(1, int(original_width * zoom))
-    canvas_height = max(1, int(original_height * zoom))
-
-    resized_image = image.resize(
-        (canvas_width, canvas_height),
-        Image.Resampling.LANCZOS
-    )
-
-    # ========================================================
-    # 左右の定義
-    # ========================================================
-
-    st.markdown(
-        """
-        ### 左右の定義
-
-        始点から終点へ向かって見たときの左右です。
-
-        ```
-                    左側
-                     ↓
-        始点 ●────────────● 終点
-                     ↑
-                    右側
-        ```
-        """
-    )
-
-    # ========================================================
-    # 編集中かどうか
-    # ========================================================
-
-    if st.session_state.editing_id is not None:
-
-        editing_annotation = None
-
-        for ann in st.session_state.annotations:
-            if ann["id"] == st.session_state.editing_id:
-                editing_annotation = ann
-                break
-
-        if editing_annotation is not None:
-
-            st.warning(
-                f"ID {st.session_state.editing_id} を修正中です。"
+        # ポリラインと頂点の描画
+        if len(pts) > 1:
+            draw.line(pts, fill=line_color, width=width)
+        for pt in pts:
+            r = 5
+            draw.ellipse(
+                [pt[0] - r, pt[1] - r, pt[0] + r, pt[1] + r],
+                fill=line_color,
+                outline=(255, 255, 255),
             )
 
-            # 編集中の点を使用
-            if len(st.session_state.edit_points) > 0:
-                display_points = st.session_state.edit_points
-            else:
-                display_points = editing_annotation["polyline"]
+        # IDのテキスト表示
+        if pts:
+            start_p = pts[0]
+            draw.text(
+                (start_p[0] + 8, start_p[1] - 8),
+                f"ID:{ann_id}",
+                fill=(0, 0, 0),
+                font=font,
+            )
 
-        else:
-            st.session_state.editing_id = None
-            display_points = st.session_state.current_points
+    # 現在修正中・作成中のポリラインを緑色で一時描画
+    if st.session_state.current_points:
+        curr_pts = [tuple(p) for p in st.session_state.current_points]
+        if len(curr_pts) > 1:
+            draw.line(curr_pts, fill=(0, 200, 0), width=4)  # 緑
+        for pt in curr_pts:
+            r = 6
+            draw.ellipse(
+                [pt[0] - r, pt[1] - r, pt[0] + r, pt[1] + r],
+                fill=(0, 250, 0),
+                outline=(0, 0, 0),
+            )
 
-    else:
-        display_points = st.session_state.current_points
-
-
-    # ========================================================
-    # キャンバス
-    # ========================================================
-
-    # 編集中の既存点をキャンバスに表示するための初期データ
-    initial_drawing = None
-
-    if len(display_points) > 0:
-
-        objects = []
-
-        for point in display_points:
-
-            x_original = point[0]
-            y_original = point[1]
-
-            x_display = x_original * zoom
-            y_display = y_original * zoom
-
-            objects.append({
-                "type": "circle",
-                "left": x_display - 5,
-                "top": y_display - 5,
-                "radius": 5,
-                "fill": "red",
-                "stroke": "red",
-                "strokeWidth": 1,
-                "scaleX": 1,
-                "scaleY": 1
-            })
-
-        initial_drawing = json.dumps({
-            "version": "4.4.0",
-            "objects": objects
-        })
-
-
-    # ========================================================
-    # キャンバス表示
-    # ========================================================
-
-    canvas_container = st.container(
-        height=700,
-        border=True
+    # 表示用に縮小・拡大リサイズ
+    canvas_bg_resized = canvas_bg_orig.resize(
+        (disp_w, disp_h), Image.Resampling.LANCZOS
     )
 
-    with canvas_container:
+    # --------------------------------------------------------------------------
+    # 4. メインレイアウト（左：画像・描画領域 / 右：属性入力 & データ管理）
+    # --------------------------------------------------------------------------
+    col_canvas, col_form = st.columns([7, 5])
 
+    with col_canvas:
+        st.subheader("🖼️ 画像描画エリア")
+        st.caption(
+            "画像上をクリックしてポリラインを作成します。（ズーム時はスクロールして閲覧可能）"
+        )
+
+        # 描画キャンバスの配置（スクロール領域内に配置）
         canvas_result = st_canvas(
-            fill_color="rgba(255, 0, 0, 0.3)",
+            fill_color="rgba(255, 165, 0, 0.3)",
             stroke_width=2,
-            stroke_color="#ff0000",
-            background_image=resized_image,
+            stroke_color="#000000",
+            background_image=canvas_bg_resized,
             update_streamlit=True,
-            height=canvas_height,
-            width=canvas_width,
+            height=disp_h,
+            width=disp_w,
             drawing_mode="point",
-            point_display_radius=5,
-            key=f"canvas_{st.session_state.image_name}_{st.session_state.editing_id}_{zoom}",
-            initial_drawing=initial_drawing
+            key=f"canvas_{zoom_percent}_{len(st.session_state.current_points)}_{st.session_state.editing_id}",
         )
 
-
-    # ========================================================
-    # キャンバス上のクリック点を取得
-    # ========================================================
-
-    if canvas_result.json_data is not None:
-
-        objects = canvas_result.json_data.get(
-            "objects",
-            []
-        )
-
-        current_canvas_count = len(objects)
-
-        # 新しく追加された点だけ取得
-        if current_canvas_count > st.session_state.last_canvas_count:
-
-            new_objects = objects[
-                st.session_state.last_canvas_count:
-            ]
-
-            for obj in new_objects:
-
-                if obj.get("type") != "circle":
-                    continue
-
-                left = obj.get("left", 0)
-                top = obj.get("top", 0)
-
-                radius = obj.get("radius", 5)
-
-                scale_x = obj.get("scaleX", 1)
-                scale_y = obj.get("scaleY", 1)
-
-                # 円の中心位置
-                x_display = (
-                    left +
-                    radius * scale_x
-                )
-
-                y_display = (
-                    top +
-                    radius * scale_y
-                )
-
-                # 表示座標 → 元画像座標
-                x_original = x_display / zoom
-                y_original = y_display / zoom
-
-                # 画像範囲内に収める
-                x_original = max(
-                    0,
-                    min(
-                        original_width - 1,
-                        x_original
-                    )
-                )
-
-                y_original = max(
-                    0,
-                    min(
-                        original_height - 1,
-                        y_original
-                    )
-                )
-
-                point = [
-                    round(x_original, 2),
-                    round(y_original, 2)
-                ]
-
-                if st.session_state.editing_id is not None:
-
-                    st.session_state.edit_points.append(
-                        point
-                    )
-
-                else:
-
-                    st.session_state.current_points.append(
-                        point
-                    )
-
-            st.session_state.last_canvas_count = (
-                current_canvas_count
-            )
-
-
-    # ========================================================
-    # 現在の点数表示
-    # ========================================================
-
-    if st.session_state.editing_id is not None:
-
-        current_point_count = len(
-            st.session_state.edit_points
-        )
-
-    else:
-
-        current_point_count = len(
-            st.session_state.current_points
-        )
-
-    st.write(
-        f"現在のクリック点数：{current_point_count}"
-    )
-
-
-    # ========================================================
-    # 点操作ボタン
-    # ========================================================
-
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-
-        if st.button(
-            "1つ戻す",
-            use_container_width=True
+        # キャンバスクリック時の点の検出と座標変換（表示座標 -> 元画像座標）
+        if (
+            canvas_result.json_data is not None
+            and "objects" in canvas_result.json_data
         ):
-
-            if st.session_state.editing_id is not None:
-
-                if len(st.session_state.edit_points) > 0:
-                    st.session_state.edit_points.pop()
-
-            else:
-
-                if len(st.session_state.current_points) > 0:
-                    st.session_state.current_points.pop()
-
-            st.session_state.last_canvas_count = 0
-
-            st.rerun()
-
-
-    with col2:
-
-        if st.button(
-            "すべてクリア",
-            use_container_width=True
-        ):
-
-            if st.session_state.editing_id is not None:
-
-                st.session_state.edit_points = []
-
-            else:
-
-                st.session_state.current_points = []
-
-            st.session_state.last_canvas_count = 0
-
-            st.rerun()
-
-
-    with col3:
-
-        if st.session_state.editing_id is not None:
-
-            if st.button(
-                "修正をキャンセル",
-                use_container_width=True
-            ):
-
-                st.session_state.editing_id = None
-                st.session_state.edit_points = []
-                st.session_state.last_canvas_count = 0
-
-                st.rerun()
-
-
-    # ========================================================
-    # アノテーション情報入力
-    # ========================================================
-
-    st.divider()
-
-    st.subheader("アノテーション情報")
-
-
-    # 編集中のデータを取得
-    editing_annotation = None
-
-    if st.session_state.editing_id is not None:
-
-        for ann in st.session_state.annotations:
-
-            if ann["id"] == st.session_state.editing_id:
-                editing_annotation = ann
-                break
-
-
-    # 初期値
-    if editing_annotation is not None:
-
-        default_land_price = editing_annotation.get(
-            "land_price",
-            0
-        )
-
-        default_symbol = editing_annotation.get(
-            "symbol",
-            ""
-        )
-
-        default_shape = editing_annotation.get(
-            "mark",
-            {}
-        ).get(
-            "shape",
-            "なし"
-        )
-
-        default_left_pattern = editing_annotation.get(
-            "mark",
-            {}
-        ).get(
-            "left_pattern",
-            "なし"
-        )
-
-        default_right_pattern = editing_annotation.get(
-            "mark",
-            {}
-        ).get(
-            "right_pattern",
-            "なし"
-        )
-
-    else:
-
-        default_land_price = 0
-        default_symbol = ""
-        default_shape = "なし"
-        default_left_pattern = "なし"
-        default_right_pattern = "なし"
-
-
-    # --------------------------------------------------------
-    # 路線価
-    # --------------------------------------------------------
-
-    land_price = st.number_input(
-        "路線価",
-        min_value=0,
-        step=1,
-        value=int(default_land_price)
-    )
-
-
-    # --------------------------------------------------------
-    # 記号
-    # --------------------------------------------------------
-
-    symbol_input = st.text_input(
-        "記号（A～G）",
-        value=default_symbol,
-        max_chars=1
-    )
-
-    symbol = symbol_input.strip().upper()
-
-
-    # --------------------------------------------------------
-    # マーク
-    # --------------------------------------------------------
-
-    st.markdown("### マーク")
-
-    shape = st.selectbox(
-        "形状",
-        SHAPE_OPTIONS,
-        index=SHAPE_OPTIONS.index(
-            default_shape
-        )
-        if default_shape in SHAPE_OPTIONS
-        else SHAPE_OPTIONS.index("なし")
-    )
-
-
-    # --------------------------------------------------------
-    # 左側・右側の模様
-    # --------------------------------------------------------
-
-    col_left, col_right = st.columns(2)
-
-    with col_left:
-
-        left_pattern = st.selectbox(
-            "左側の模様",
-            PATTERN_OPTIONS,
-            index=PATTERN_OPTIONS.index(
-                default_left_pattern
-            )
-            if default_left_pattern in PATTERN_OPTIONS
-            else PATTERN_OPTIONS.index("なし")
-        )
-
-
-    with col_right:
-
-        right_pattern = st.selectbox(
-            "右側の模様",
-            PATTERN_OPTIONS,
-            index=PATTERN_OPTIONS.index(
-                default_right_pattern
-            )
-            if default_right_pattern in PATTERN_OPTIONS
-            else PATTERN_OPTIONS.index("なし")
-        )
-
-
-    # ========================================================
-    # 入力チェック
-    # ========================================================
-
-    validation_errors = []
-
-
-    # 点数チェック
-    if current_point_count < 2:
-
-        validation_errors.append(
-            "始点と終点を含め、2点以上クリックしてください。"
-        )
-
-
-    # 路線価チェック
-    if land_price is None:
-
-        validation_errors.append(
-            "路線価を入力してください。"
-        )
-
-
-    # 記号チェック
-    if symbol == "":
-
-        validation_errors.append(
-            "記号を入力してください。"
-        )
-
-    elif symbol not in list("ABCDEFG"):
-
-        validation_errors.append(
-            "記号はA～Gのいずれか1文字で入力してください。"
-        )
-
-
-    # エラー表示
-    if len(validation_errors) > 0:
-
-        for error in validation_errors:
-
-            st.warning(error)
-
-
-    # ========================================================
-    # 登録 / 修正ボタン
-    # ========================================================
-
-    if st.session_state.editing_id is not None:
-
-        button_text = "修正を確定"
-
-    else:
-
-        button_text = "アノテーションを登録"
-
-
-    can_register = (
-        current_point_count >= 2
-        and land_price is not None
-        and symbol in list("ABCDEFG")
-    )
-
-
-    if st.button(
-        button_text,
-        type="primary",
-        disabled=not can_register,
-        use_container_width=True
-    ):
-
-        # 現在の点を取得
-        if st.session_state.editing_id is not None:
-
-            polyline = [
-                list(point)
-                for point in st.session_state.edit_points
-            ]
-
-        else:
-
-            polyline = [
-                list(point)
-                for point in st.session_state.current_points
-            ]
-
-
-        # 始点・終点
-        start = list(polyline[0])
-        end = list(polyline[-1])
-
-
-        # アノテーションデータ
-        new_data = {
-            "start": start,
-            "end": end,
-            "polyline": polyline,
-            "land_price": int(land_price),
-            "symbol": symbol,
-            "mark": {
-                "shape": shape,
-                "left_pattern": left_pattern,
-                "right_pattern": right_pattern
-            }
-        }
-
-
-        # ----------------------------------------------------
-        # 修正
-        # ----------------------------------------------------
-
-        if st.session_state.editing_id is not None:
-
-            for i, ann in enumerate(
-                st.session_state.annotations
-            ):
-
-                if ann["id"] == st.session_state.editing_id:
-
-                    st.session_state.annotations[i] = {
-                        "id": ann["id"],
-                        **new_data
-                    }
-
-                    break
-
-
-            st.success(
-                f"ID {st.session_state.editing_id} を修正しました。"
-            )
-
-            st.session_state.editing_id = None
-            st.session_state.edit_points = []
-            st.session_state.last_canvas_count = 0
-
-            st.rerun()
-
-
-        # ----------------------------------------------------
-        # 新規登録
-        # ----------------------------------------------------
-
-        else:
-
-            # 最大ID + 1
-            if len(st.session_state.annotations) == 0:
-
-                new_id = 1
-
-            else:
-
-                new_id = max(
-                    ann["id"]
-                    for ann in st.session_state.annotations
-                ) + 1
-
-
-            new_data["id"] = new_id
-
-            st.session_state.annotations.append(
-                new_data
-            )
-
-            st.session_state.current_points = []
-            st.session_state.last_canvas_count = 0
-
-            st.success(
-                f"ID {new_id} を登録しました。"
-            )
-
-            st.rerun()
-
-
-    # ========================================================
-    # 登録済みアノテーション
-    # ========================================================
-
-    st.divider()
-
-    st.subheader(
-        f"登録済みアノテーション（{len(st.session_state.annotations)}件）"
-    )
-
-
-    if len(st.session_state.annotations) == 0:
-
-        st.info(
-            "まだアノテーションは登録されていません。"
-        )
-
-    else:
-
-        # スクロール可能な領域
-        registered_container = st.container(
-            height=500,
-            border=True
-        )
-
-        with registered_container:
-
-            for ann in st.session_state.annotations:
-
-                st.markdown(
-                    f"### ID {ann['id']}"
-                )
-
-                st.write(
-                    f"路線価：{ann['land_price']}"
-                )
-
-                st.write(
-                    f"記号：{ann['symbol']}"
-                )
-
-                st.write(
-                    f"形状：{ann['mark']['shape']}"
-                )
-
-                st.write(
-                    f"左側の模様：{ann['mark']['left_pattern']}"
-                )
-
-                st.write(
-                    f"右側の模様：{ann['mark']['right_pattern']}"
-                )
-
-                st.write(
-                    f"始点：{ann['start']}"
-                )
-
-                st.write(
-                    f"終点：{ann['end']}"
-                )
-
-                st.write(
-                    f"ポリライン点数：{len(ann['polyline'])}"
-                )
-
-
-                col_edit, col_delete = st.columns(2)
-
-
-                # ------------------------------------------------
-                # 修正
-                # ------------------------------------------------
-
-                with col_edit:
-
-                    if st.button(
-                        "修正",
-                        key=f"edit_{ann['id']}",
-                        use_container_width=True
-                    ):
-
-                        st.session_state.editing_id = ann["id"]
-
-                        st.session_state.edit_points = [
-                            list(point)
-                            for point in ann["polyline"]
-                        ]
-
-                        st.session_state.last_canvas_count = 0
-
-                        st.rerun()
-
-
-                # ------------------------------------------------
-                # 削除
-                # ------------------------------------------------
-
-                with col_delete:
-
-                    if st.button(
-                        "削除",
-                        key=f"delete_{ann['id']}",
-                        use_container_width=True
-                    ):
-
-                        st.session_state.annotations = [
-                            item
-                            for item in st.session_state.annotations
-                            if item["id"] != ann["id"]
-                        ]
-
-                        st.success(
-                            f"ID {ann['id']} を削除しました。"
-                        )
-
-                        st.rerun()
-
-
-                st.divider()
-
-
-    # ========================================================
-    # JSON保存
-    # ========================================================
-
-    st.divider()
-
-    st.subheader("JSON保存")
-
-
-    save_data = {
-        "image_name": st.session_state.image_name,
-        "image_width": st.session_state.image_width,
-        "image_height": st.session_state.image_height,
-        "annotations": st.session_state.annotations
-    }
-
-
-    json_string = json.dumps(
-        save_data,
-        ensure_ascii=False,
-        indent=2
-    )
-
-
-    st.download_button(
-        label="アノテーション結果をJSONで保存",
-        data=json_string,
-        file_name="annotations.json",
-        mime="application/json",
-        use_container_width=True
-    )
-
-
-    # ========================================================
-    # JSON読み込み
-    # ========================================================
-
-    st.divider()
-
-    st.subheader("JSON読み込み")
-
-
-    json_file = st.file_uploader(
-        "保存したJSONを選択してください",
-        type=["json"],
-        key="json_loader"
-    )
-
-
-    if json_file is not None:
-
-        if st.button(
-            "JSONを読み込む",
-            use_container_width=True
-        ):
-
-            try:
-
-                loaded_data = json.load(
-                    json_file
-                )
-
-
-                # --------------------------------------------
-                # 基本構造チェック
-                # --------------------------------------------
-
-                if "annotations" not in loaded_data:
-
-                    st.error(
-                        "JSONにannotationsがありません。"
-                    )
-
-                else:
-
-                    # ----------------------------------------
-                    # 画像情報の確認
-                    # ----------------------------------------
-
-                    json_image_name = loaded_data.get(
-                        "image_name"
-                    )
-
-                    json_image_width = loaded_data.get(
-                        "image_width"
-                    )
-
-                    json_image_height = loaded_data.get(
-                        "image_height"
-                    )
-
-
-                    if (
-                        json_image_width is not None
-                        and json_image_height is not None
-                    ):
-
-                        if (
-                            json_image_width != original_width
-                            or
-                            json_image_height != original_height
-                        ):
-
-                            st.warning(
-                                "JSONに保存されている画像サイズと、"
-                                "現在アップロードされている画像のサイズが異なります。"
-                            )
-
-
-                    # ----------------------------------------
-                    # アノテーション読み込み
-                    # ----------------------------------------
-
-                    loaded_annotations = []
-
-                    for ann in loaded_data["annotations"]:
-
-                        # 最低限必要な項目
-                        if "id" not in ann:
-                            continue
-
-                        if "polyline" not in ann:
-                            continue
-
-                        if "start" not in ann:
-                            continue
-
-                        if "end" not in ann:
-                            continue
-
-                        if "land_price" not in ann:
-                            continue
-
-                        if "symbol" not in ann:
-                            continue
-
-                        if "mark" not in ann:
-                            continue
-
-
-                        loaded_annotations.append(
-                            ann
-                        )
-
-
-                    st.session_state.annotations = (
-                        loaded_annotations
-                    )
-
-                    st.session_state.current_points = []
-                    st.session_state.editing_id = None
-                    st.session_state.edit_points = []
-                    st.session_state.last_canvas_count = 0
-
-                    st.success(
-                        f"{len(loaded_annotations)}件のアノテーションを読み込みました。"
-                    )
-
+            objects = canvas_result.json_data["objects"]
+            if len(objects) > 0:
+                last_obj = objects[-1]
+                click_x_disp = last_obj["left"]
+                click_y_disp = last_obj["top"]
+
+                # 元画像座標に逆算変換
+                orig_x = int(round(click_x_disp / zoom_scale))
+                orig_y = int(round(click_y_disp / zoom_scale))
+
+                # 重複登録を防ぐ処理（最後の点と極端に同じでなければ追加）
+                if (
+                    not st.session_state.current_points
+                    or st.session_state.current_points[-1] != [orig_x, orig_y]
+                ):
+                    st.session_state.current_points.append([orig_x, orig_y])
                     st.rerun()
 
+        # ポリライン作成操作用ボタン
+        c_btn1, c_btn2 = st.columns(2)
+        with c_btn1:
+            if st.button("↩️ 1つ戻す（最後の点を削除）"):
+                if st.session_state.current_points:
+                    st.session_state.current_points.pop()
+                    st.rerun()
+        with c_btn2:
+            if st.button("🗑️ すべてクリア"):
+                st.session_state.current_points = []
+                st.rerun()
 
-            except Exception as e:
+        # クリックポイント一覧表示
+        st.write(
+            f"**現在のポリライン点数**: {len(st.session_state.current_points)} 点"
+        )
+        if st.session_state.current_points:
+            st.json(st.session_state.current_points)
 
+    with col_form:
+        st.subheader(
+            "📝 アノテーション入力"
+            if st.session_state.editing_id is None
+            else f"✏️ アノテーション修正 (ID: {st.session_state.editing_id})"
+        )
+
+        # 左右定義ガイド表示
+        st.info(
+            """
+        **左右の定義**（始点から終点へ向かって見たときの左右）:  
+        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **左側**  
+        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ↓  
+        **始点** ●────────────● **終点**  
+        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ↑  
+        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **右側**
+        """
+        )
+
+        # 修正モード時の初期値設定
+        default_price = 0
+        default_symbol = ""
+        default_shape = "なし"
+        default_l_pattern = "なし"
+        default_r_pattern = "なし"
+
+        if st.session_state.editing_id is not None:
+            edit_item = next(
+                (
+                    item
+                    for item in st.session_state.annotations
+                    if item["id"] == st.session_state.editing_id
+                ),
+                None,
+            )
+            if edit_item:
+                default_price = int(edit_item.get("land_price", 0))
+                default_symbol = edit_item.get("symbol", "")
+                mark_info = edit_item.get("mark", {})
+                default_shape = mark_info.get("shape", "なし")
+                default_l_pattern = mark_info.get("left_pattern", "なし")
+                default_r_pattern = mark_info.get("right_pattern", "なし")
+
+        # 入力フォーム
+        with st.form("annotation_form"):
+            land_price = st.number_input(
+                "路線価（必須・数値）", min_value=0, value=default_price, step=1000
+            )
+
+            symbol_raw = st.text_input(
+                "記号 (A～Gの1文字)",
+                value=default_symbol,
+                max_chars=1,
+                help="小文字は自動で大文字化されます",
+            )
+
+            shape_options = [
+                "六角形",
+                "楕円",
+                "八角形",
+                "正円",
+                "縦に潰れたひし形",
+                "横長の長方形",
+                "なし",
+            ]
+            shape_idx = (
+                shape_options.index(default_shape)
+                if default_shape in shape_options
+                else 6
+            )
+            shape = st.selectbox("マーク形状", shape_options, index=shape_idx)
+
+            pattern_options = ["斜線", "黒塗り", "なし"]
+
+            l_idx = (
+                pattern_options.index(default_l_pattern)
+                if default_l_pattern in pattern_options
+                else 2
+            )
+            left_pattern = st.selectbox(
+                "左側模様", pattern_options, index=l_idx
+            )
+
+            r_idx = (
+                pattern_options.index(default_r_pattern)
+                if default_r_pattern in pattern_options
+                else 2
+            )
+            right_pattern = st.selectbox(
+                "右側模様", pattern_options, index=r_idx
+            )
+
+            btn_label = (
+                "登録"
+                if st.session_state.editing_id is None
+                else "修正を保存"
+            )
+            submitted = st.form_submit_button(btn_label)
+
+        # 登録・保存処理
+        if submitted:
+            symbol = symbol_raw.strip().upper()
+            valid = True
+
+            # バリデーションチェック
+            if len(st.session_state.current_points) < 2:
                 st.error(
-                    f"JSONの読み込みに失敗しました：{e}"
+                    "❌ ポリラインは2点以上指定する必要があります（クリックして点を追加してください）。"
                 )
+                valid = False
 
+            if land_price <= 0:
+                st.error("❌ 路線価を入力してください（0より大きい数値）。")
+                valid = False
+
+            if symbol not in ["A", "B", "C", "D", "E", "F", "G"]:
+                st.error("❌ 記号は A～G の1文字である必要があります。")
+                valid = False
+
+            if valid:
+                pts = st.session_state.current_points
+                start_pt = pts[0]
+                end_pt = pts[-1]
+
+                annotation_data = {
+                    "id": (
+                        st.session_state.editing_id
+                        if st.session_state.editing_id is not None
+                        else st.session_state.next_id
+                    ),
+                    "start": start_pt,
+                    "end": end_pt,
+                    "polyline": pts,
+                    "land_price": land_price,
+                    "symbol": symbol,
+                    "mark": {
+                        "shape": shape,
+                        "left_pattern": left_pattern,
+                        "right_pattern": right_pattern,
+                    },
+                }
+
+                if st.session_state.editing_id is not None:
+                    # 修正適用
+                    idx = next(
+                        i
+                        for i, a in enumerate(st.session_state.annotations)
+                        if a["id"] == st.session_state.editing_id
+                    )
+                    st.session_state.annotations[idx] = annotation_data
+                    st.success(
+                        f"ID:{st.session_state.editing_id} のアノテーションを更新しました！"
+                    )
+                    st.session_state.editing_id = None
+                else:
+                    # 新規追加
+                    st.session_state.annotations.append(annotation_data)
+                    st.session_state.next_id += 1
+                    st.success("アノテーションを登録しました！")
+
+                # 入力リセット
+                st.session_state.current_points = []
+                st.rerun()
+
+        if st.session_state.editing_id is not None:
+            if st.button("❌ 修正をキャンセル"):
+                st.session_state.editing_id = None
+                st.session_state.current_points = []
+                st.rerun()
+
+        st.markdown("---")
+
+        # ----------------------------------------------------------------------
+        # 5. 登録済みアノテーション一覧表示 & 修正/削除ボタン
+        # ----------------------------------------------------------------------
+        count = len(st.session_state.annotations)
+        st.subheader(f"📋 登録済みアノテーション（{count}件）")
+
+        # スクロール可能領域の構成
+        with st.container(height=350, border=True):
+            if count == 0:
+                st.info("登録済みのデータはありません。")
+            else:
+                for ann in st.session_state.annotations:
+                    with st.expander(
+                        f"ID: {ann['id']} | 路線価: {ann['land_price']} | 記号: {ann['symbol']}",
+                        expanded=True,
+                    ):
+                        col_a, col_b = st.columns([3, 2])
+                        with col_a:
+                            st.write(f"**ID**: {ann['id']}")
+                            st.write(f"**路線価**: {ann['land_price']}")
+                            st.write(f"**記号**: {ann['symbol']}")
+                            st.write(f"**形状**: {ann['mark']['shape']}")
+                            st.write(
+                                f"**左側模様**: {ann['mark']['left_pattern']}"
+                            )
+                            st.write(
+                                f"**右側模様**: {ann['mark']['right_pattern']}"
+                            )
+                            st.write(f"**始点**: {ann['start']}")
+                            st.write(f"**終点**: {ann['end']}")
+                            st.write(
+                                f"**ポリライン点数**: {len(ann['polyline'])} 点"
+                            )
+
+                        with col_b:
+                            if st.button("✏️ 修正", key=f"edit_{ann['id']}"):
+                                st.session_state.editing_id = ann["id"]
+                                st.session_state.current_points = list(
+                                    ann["polyline"]
+                                )
+                                st.rerun()
+
+                            if st.button("🗑️ 削除", key=f"del_{ann['id']}"):
+                                st.session_state.annotations = [
+                                    a
+                                    for a in st.session_state.annotations
+                                    if a["id"] != ann["id"]
+                                ]
+                                if (
+                                    st.session_state.editing_id == ann["id"]
+                                ):  # 修正中のものが削除された場合
+                                    st.session_state.editing_id = None
+                                    st.session_state.current_points = []
+                                st.rerun()
+
+    # --------------------------------------------------------------------------
+    # 6. JSON保存ボタン（サイドバーまたは最下部）
+    # --------------------------------------------------------------------------
+    st.sidebar.markdown("---")
+    output_json_data = {
+        "image_name": image_name,
+        "image_width": orig_w,
+        "image_height": orig_h,
+        "annotations": st.session_state.annotations,
+    }
+
+    json_str = json.dumps(output_json_data, ensure_ascii=False, indent=2)
+
+    st.sidebar.download_button(
+        label="💾 JSONとして保存（ダウンロード）",
+        data=json_str,
+        file_name="annotations.json",
+        mime="application/json",
+    )
 
 else:
-
     st.info(
-        "まず路線価図の画像をアップロードしてください。"
+        "👈 左側のサイドバーから路線価図の画像ファイルをアップロードしてください。"
     )
