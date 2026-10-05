@@ -20,6 +20,8 @@ if "next_id" not in st.session_state:
     st.session_state.next_id = 1  # 新規アノテーションIDカウンタ
 if "json_load_warning" not in st.session_state:
     st.session_state.json_load_warning = None
+if "canvas_revision" not in st.session_state:
+    st.session_state.canvas_revision = 0
 
 st.title("📍 路線価アノテーションツール")
 
@@ -189,7 +191,10 @@ if uploaded_image is not None:
                 drawing_mode="point",
                 # クリックのたびにkeyを変えるとキャンバスが再生成され、
                 # ズーム時のスクロール位置が先頭に戻るため、表示条件だけで固定する。
-                key=f"canvas_{zoom_percent}_{st.session_state.editing_id}",
+                key=(
+                    f"canvas_{zoom_percent}_{st.session_state.editing_id}_"
+                    f"{st.session_state.canvas_revision}"
+                ),
             )
 
         # キャンバスクリック時の点の検出と座標変換（表示座標 -> 元画像座標）
@@ -221,10 +226,12 @@ if uploaded_image is not None:
             if st.button("↩️ 1つ戻す（最後の点を削除）"):
                 if st.session_state.current_points:
                     st.session_state.current_points.pop()
+                    st.session_state.canvas_revision += 1
                     st.rerun()
         with c_btn2:
             if st.button("🗑️ すべてクリア"):
                 st.session_state.current_points = []
+                st.session_state.canvas_revision += 1
                 st.rerun()
 
         # クリックポイント一覧表示
