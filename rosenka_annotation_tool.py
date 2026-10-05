@@ -526,15 +526,27 @@ with control_col:
     # -----------------------------------------------------
 
     if st.button(
-        "現在の点をクリア",
-        width="stretch"
-    ):
+    "現在の点をクリア",
+    width="stretch"
+):
 
-        st.session_state.current_points = []
+    # 現在の最後のクリック位置を記録
+    # → rerun後に同じクリックを無視する
+    if st.session_state.current_points:
 
-        st.session_state.last_click = None
+        last_point = (
+            st.session_state.current_points[-1]
+        )
 
-        st.rerun()
+        st.session_state.ignore_click = (
+            tuple(last_point)
+        )
+
+    st.session_state.current_points = []
+
+    st.session_state.last_click = None
+
+    st.rerun()
 
 
     st.divider()
@@ -783,7 +795,7 @@ with control_col:
         st.session_state.current_points = []
 
         st.session_state.last_click = None
-
+        st.session_state.ignore_click = None
         st.session_state.zoom = 1.0
 
         st.rerun()
