@@ -1,47 +1,40 @@
+import streamlit as st
+import streamlit.components.v1 as components
+
 import base64
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 
-import streamlit as st
-import streamlit.components.v1 as components
-from PIL import Image
 
-
-# ============================================================
-# 設定
-# ============================================================
+# =========================================================
+# 基本設定
+# =========================================================
 
 st.set_page_config(
-    page_title="路線価アノテーションツール",
-    page_icon="🗺️",
-    layout="wide",
+    page_title="路線価図アノテーションツール",
+    layout="wide"
 )
 
+st.title("路線価図アノテーションツール")
 
-# ============================================================
+
+# =========================================================
 # カスタムコンポーネント
-# ============================================================
+# =========================================================
 
-VIEWER_PATH = str(
-    Path(__file__).parent / "rosenka_viewer"
-)
+COMPONENT_DIR = Path(__file__).parent / "rosenka_viewer"
 
-rosenka_viewer = components.declare_component(
+viewer_component = components.declare_component(
     "rosenka_viewer",
-    path=VIEWER_PATH,
+    path=str(COMPONENT_DIR)
 )
 
 
-# ============================================================
-# Session State
-# ============================================================
-
-if "image" not in st.session_state:
-    st.session_state.image = None
-
-if "image_name" not in st.session_state:
-    st.session_state.image_name = None
+# =========================================================
+# Session State 初期化
+# =========================================================
 
 if "annotations" not in st.session_state:
     st.session_state.annotations = []
@@ -49,625 +42,497 @@ if "annotations" not in st.session_state:
 if "current_points" not in st.session_state:
     st.session_state.current_points = []
 
-if "viewer_key" not in st.session_state:
-    st.session_state.viewer_key = 0
+if "zoom" not in st.session_state:
+    st.session_state.zoom = 1.0
 
-if "last_viewer_event" not in st.session_state:
-    st.session_state.last_viewer_event = None
+if "scroll_left" not in st.session_state:
+    st.session_state.scroll_left = 0
+
+if "scroll_top" not in st.session_state:
+    st.session_state.scroll_top = 0
+
+if "image_name" not in st.session_state:
+    st.session_state.image_name = None
+
+if "image_width" not in st.session_state:
+    st.session_state.image_width = 0
+
+if "image_height" not in st.session_state:
+    st.session_state.image_height = 0
+
+if "image_base64" not in st.session_state:
+    st.session_state.image_base64 = None
 
 
-# ============================================================
-# 関数
-# ============================================================
-
-def image_to_base64(image: Image.Image) -> str:
-
-    import io
-
-    buffer = io.BytesIO()
-
-    image.save(
-        buffer,
-        format="PNG"
-    )
-
-    return base64.b64encode(
-        buffer.getvalue()
-    ).decode("utf-8")
-
+# =========================================================
+# JSON保存
+# =========================================================
 
 def save_json():
 
-    if st.session_state.image is None:
-        return None
+    if not st.session_state.image_name:
+        return
 
+    os.makedirs("annotations", exist_ok=True)
 
     data = {
         "image": st.session_state.image_name,
-
-        "image_width":
-            st.session_state.image.width,
-
-        "image_height":
-            st.session_state.image.height,
-
-        "annotations":
-            st.session_state.annotations,
-
+        "image_width": st.session_state.image_width,
+        "image_height": st.session_state.image_height,
+        "annotations": st.session_state.annotations
     }
-
-
-    json_string = json.dumps(
-        data,
-        ensure_ascii=False,
-        indent=2,
-    )
-
-
-    # --------------------------------------------------------
-    # ローカルにも保存
-    # --------------------------------------------------------
-
-    save_dir = Path("annotations")
-
-    save_dir.mkdir(
-        exist_ok=True
-    )
-
 
     stem = Path(
         st.session_state.image_name
     ).stem
 
+    save_path = Path(
+        "annotations"
+    ) / f"{stem}_annotations.json"
 
-    save_path = (
-        save_dir /
-        f"{stem}_annotations.json"
-    )
+    with open(
+        save_path,
+        "w",
+        encoding="utf-8"
+    ) as f:
 
-
-    save_path.write_text(
-        json_string,
-        encoding="utf-8",
-    )
-
-
-    return json_string
-
-
-def undo_point():
-
-    if st.session_state.current_points:
-
-        st.session_state.current_points.pop()
+        json.dump(
+            data,
+            f,
+            ensure_ascii=False,
+            indent=2
+        )
 
 
-def clear_current_points():
+# =========================================================
+# 画像アップロード
+# =========================================================
 
-    st.session_state.current_points = []
-
-    st.session_state.viewer_key += 1
-
-
-def delete_annotation(annotation_id):
-
-    st.session_state.annotations = [
-        annotation
-        for annotation
-        in st.session_state.annotations
-
-        if annotation["id"] != annotation_id
+uploaded_file = st.file_uploader(
+    "路線価図画像をアップロードしてください",
+    type=[
+        "png",
+        "jpg",
+        "jpeg"
     ]
-
-
-# ============================================================
-# タイトル
-# ============================================================
-
-st.title(
-    "🗺️ 路線価アノテーションツール"
-)
-
-st.caption(
-    "路線価図の矢印・路線価・記号をアノテーションします。"
 )
 
 
-# ============================================================
-# サイドバー
-# ============================================================
+if uploaded_file is not None:
 
-with st.sidebar:
+    # -----------------------------------------------------
+    # 新しい画像がアップロードされた場合
+    # -----------------------------------------------------
 
-    st.header("画像")
+    if (
+        st.session_state.image_name
+        != uploaded_file.name
+    ):
 
-    uploaded_file = st.file_uploader(
-        "路線価画像をアップロード",
-
-        type=[
-            "png",
-            "jpg",
-            "jpeg",
-            "webp",
-            "tif",
-            "tiff",
-        ],
-    )
-
-
-    # --------------------------------------------------------
-    # 画像読み込み
-    # --------------------------------------------------------
-
-    if uploaded_file is not None:
-
-        if (
-            st.session_state.image_name
-            != uploaded_file.name
-        ):
-
-            image = Image.open(
-                uploaded_file
-            ).convert("RGB")
-
-
-            st.session_state.image = image
-
-            st.session_state.image_name = (
-                uploaded_file.name
-            )
-
-            st.session_state.annotations = []
-
-            st.session_state.current_points = []
-
-            st.session_state.last_viewer_event = None
-
-            st.session_state.viewer_key += 1
-
-
-    if st.session_state.image is not None:
-
-        st.write(
-            f"**ファイル:** "
-            f"{st.session_state.image_name}"
+        st.session_state.image_name = (
+            uploaded_file.name
         )
 
-        st.write(
-            f"**サイズ:** "
-            f"{st.session_state.image.width} × "
-            f"{st.session_state.image.height} px"
+        image_bytes = uploaded_file.getvalue()
+
+        st.session_state.image_base64 = (
+            "data:image/png;base64,"
+            + base64.b64encode(
+                image_bytes
+            ).decode("utf-8")
         )
 
+        # Pillowで画像サイズ取得
+        from PIL import Image
 
-# ============================================================
+        from io import BytesIO
+
+        image = Image.open(
+            BytesIO(image_bytes)
+        )
+
+        st.session_state.image_width = (
+            image.width
+        )
+
+        st.session_state.image_height = (
+            image.height
+        )
+
+        # 新しい画像なのでリセット
+        st.session_state.annotations = []
+        st.session_state.current_points = []
+
+        st.session_state.zoom = 1.0
+        st.session_state.scroll_left = 0
+        st.session_state.scroll_top = 0
+
+
+# =========================================================
 # 画像がない場合
-# ============================================================
+# =========================================================
 
-if st.session_state.image is None:
+if st.session_state.image_base64 is None:
 
     st.info(
-        "左側から路線価画像をアップロードしてください。"
+        "路線価図画像をアップロードしてください。"
     )
 
     st.stop()
 
 
-# ============================================================
-# 操作説明
-# ============================================================
+# =========================================================
+# 左右レイアウト
+# =========================================================
 
-st.subheader(
-    "① 矢印をアノテーション"
-)
-
-st.markdown(
-    """
-**操作方法**
-
-- **左クリック**：点を追加
-- **左ドラッグ**：画像を移動
-- **マウスホイール**：画像をスクロール
-- **Ctrl + マウスホイール**：マウス位置を中心にズーム
-- **ダブルクリック**：100%に戻す
-- **1点戻す**：直前の点を削除
-- **全点クリア**：現在作成中の矢印を削除
-
-曲線の矢印は、
-
-`始点 → 経由点 → 経由点 → 終点`
-
-の順番にクリックしてください。
-"""
+left_col, right_col = st.columns(
+    [4, 1]
 )
 
 
-# ============================================================
-# 画像ビューア
-# ============================================================
+# =========================================================
+# 左側：地図
+# =========================================================
 
-image_base64 = image_to_base64(
-    st.session_state.image
-)
+with left_col:
 
+    st.subheader("路線価図")
 
-event = rosenka_viewer(
-    image=image_base64,
+    # -----------------------------------------------------
+    # カスタムビューア
+    # -----------------------------------------------------
 
-    reset_points=(
-        st.session_state.viewer_key
-    ),
+    viewer_result = viewer_component(
 
-    key="rosenka_viewer",
-)
+        image=st.session_state.image_base64,
 
+        image_width=(
+            st.session_state.image_width
+        ),
 
-# ============================================================
-# Viewerからクリック座標を受け取る
-# ============================================================
+        image_height=(
+            st.session_state.image_height
+        ),
 
-if event is not None:
+        annotations=(
+            st.session_state.annotations
+        ),
 
-    event_key = json.dumps(
-        event,
-        sort_keys=True,
-        ensure_ascii=False,
+        current_points=(
+            st.session_state.current_points
+        ),
+
+        zoom=(
+            st.session_state.zoom
+        ),
+
+        scroll_left=(
+            st.session_state.scroll_left
+        ),
+
+        scroll_top=(
+            st.session_state.scroll_top
+        ),
+
+        height=650
     )
 
 
-    if (
-        event_key
-        != st.session_state.last_viewer_event
-    ):
+# =========================================================
+# ★ クリック結果を受け取る部分
+# =========================================================
 
-        st.session_state.last_viewer_event = (
-            event_key
+if viewer_result is not None:
+
+    # -----------------------------------------------------
+    # 地図上をクリックした場合
+    # -----------------------------------------------------
+
+    if viewer_result.get("type") == "point":
+
+        st.session_state.current_points = (
+            viewer_result.get(
+                "current_points",
+                []
+            )
         )
 
-
-        if event.get("type") == "point":
-
-            x = int(event["x"])
-
-            y = int(event["y"])
-
-
-            st.session_state.current_points.append(
-                [x, y]
+        # ズーム倍率を保存
+        st.session_state.zoom = (
+            viewer_result.get(
+                "zoom",
+                st.session_state.zoom
             )
+        )
 
+        # スクロール位置を保存
+        st.session_state.scroll_left = (
+            viewer_result.get(
+                "scroll_left",
+                st.session_state.scroll_left
+            )
+        )
+
+        st.session_state.scroll_top = (
+            viewer_result.get(
+                "scroll_top",
+                st.session_state.scroll_top
+            )
+        )
+
+        st.rerun()
+
+
+# =========================================================
+# 右側：アノテーション操作
+# =========================================================
+
+with right_col:
+
+    st.subheader("アノテーション")
+
+
+    # -----------------------------------------------------
+    # 現在の点数
+    # -----------------------------------------------------
+
+    st.write(
+        f"現在の点数："
+        f"{len(st.session_state.current_points)}"
+    )
+
+
+    # -----------------------------------------------------
+    # 1点戻す
+    # -----------------------------------------------------
+
+    if st.button(
+        "1点戻す",
+        use_container_width=True
+    ):
+
+        if st.session_state.current_points:
+
+            st.session_state.current_points.pop()
 
             st.rerun()
 
 
-# ============================================================
-# 現在のpolyline
-# ============================================================
-
-st.subheader(
-    "現在の矢印"
-)
-
-
-col1, col2, col3 = st.columns(3)
-
-
-with col1:
-
-    st.metric(
-        "現在の点数",
-        len(
-            st.session_state.current_points
-        ),
-    )
-
-
-with col2:
-
-    st.metric(
-        "登録済み",
-        len(
-            st.session_state.annotations
-        ),
-    )
-
-
-with col3:
+    # -----------------------------------------------------
+    # 現在の点をすべて削除
+    # -----------------------------------------------------
 
     if st.button(
-        "↩️ 1点戻す",
-        use_container_width=True,
+        "現在の点をクリア",
+        use_container_width=True
     ):
 
-        undo_point()
+        st.session_state.current_points = []
 
         st.rerun()
 
 
-# ============================================================
-# クリア
-# ============================================================
-
-if st.button(
-    "🗑️ 現在の矢印を全クリア",
-    use_container_width=True,
-):
-
-    clear_current_points()
-
-    st.rerun()
+    st.divider()
 
 
-# ============================================================
-# 座標表示
-# ============================================================
-
-if st.session_state.current_points:
-
-    st.write(
-        "現在のpolyline座標"
-    )
-
-    st.code(
-        json.dumps(
-            st.session_state.current_points,
-            ensure_ascii=False,
-            indent=2,
-        ),
-        language="json",
-    )
-
-
-# ============================================================
-# 路線価・記号
-# ============================================================
-
-st.divider()
-
-st.subheader(
-    "② 路線価・記号"
-)
-
-
-col1, col2 = st.columns(2)
-
-
-with col1:
+    # -----------------------------------------------------
+    # 路線価
+    # -----------------------------------------------------
 
     road_value = st.text_input(
         "路線価",
-        placeholder="例：120",
+        placeholder="例：120"
     )
 
 
-with col2:
+    # -----------------------------------------------------
+    # 記号
+    # -----------------------------------------------------
 
     symbol = st.text_input(
-        "路線価の記号",
-        placeholder="例：A",
+        "記号",
+        placeholder="例：A"
     )
 
 
-# ============================================================
-# アノテーション登録
-# ============================================================
+    # -----------------------------------------------------
+    # アノテーション登録
+    # -----------------------------------------------------
 
-if st.button(
-    "＋ アノテーションを追加",
-    type="primary",
-    use_container_width=True,
-):
+    if st.button(
+        "アノテーション登録",
+        use_container_width=True,
+        type="primary"
+    ):
 
-    if len(
-        st.session_state.current_points
-    ) < 2:
+        if len(
+            st.session_state.current_points
+        ) < 2:
 
-        st.error(
-            "始点・終点の2点以上を指定してください。"
-        )
+            st.warning(
+                "2点以上クリックしてください。"
+            )
 
+        elif road_value == "":
 
-    elif not road_value.strip():
-
-        st.error(
-            "路線価を入力してください。"
-        )
-
-
-    elif not symbol.strip():
-
-        st.error(
-            "路線価の記号を入力してください。"
-        )
-
-
-    else:
-
-        if st.session_state.annotations:
-
-            new_id = max(
-                a["id"]
-                for a
-                in st.session_state.annotations
-            ) + 1
+            st.warning(
+                "路線価を入力してください。"
+            )
 
         else:
 
-            new_id = 1
+            points = (
+                st.session_state.current_points
+            )
+
+            annotation_id = (
+                len(
+                    st.session_state.annotations
+                ) + 1
+            )
+
+            annotation = {
+
+                "id": annotation_id,
+
+                "road_value": road_value,
+
+                "symbol": symbol,
+
+                "polyline_px": points,
+
+                "start_point_px": points[0],
+
+                "end_point_px": points[-1],
+
+                "created_at": (
+                    datetime.now().isoformat()
+                )
+            }
+
+            st.session_state.annotations.append(
+                annotation
+            )
+
+            # 現在の入力をリセット
+            st.session_state.current_points = []
+
+            # JSON保存
+            save_json()
+
+            st.success(
+                f"アノテーション "
+                f"{annotation_id} を登録しました。"
+            )
+
+            st.rerun()
 
 
-        points = [
-            point.copy()
-            for point
-            in st.session_state.current_points
-        ]
+    st.divider()
 
 
-        annotation = {
+    # =====================================================
+    # 登録済みアノテーション
+    # =====================================================
 
-            "id": new_id,
-
-            "road_value":
-                road_value.strip(),
-
-            "symbol":
-                symbol.strip(),
-
-            "polyline_px":
-                points,
-
-            "start_point_px":
-                points[0],
-
-            "end_point_px":
-                points[-1],
-
-            "created_at":
-                datetime.now().isoformat(),
-
-        }
-
-
-        st.session_state.annotations.append(
-            annotation
-        )
-
-
-        # 現在の矢印をクリア
-        st.session_state.current_points = []
-
-        st.session_state.viewer_key += 1
-
-
-        # 自動保存
-        save_json()
-
-
-        st.success(
-            f"ID {new_id} を登録しました。"
-        )
-
-
-        st.rerun()
-
-
-# ============================================================
-# 登録済みアノテーション
-# ============================================================
-
-st.divider()
-
-st.subheader(
-    "③ 登録済みアノテーション"
-)
-
-
-if not st.session_state.annotations:
-
-    st.info(
-        "まだアノテーションはありません。"
+    st.subheader(
+        "登録済み"
     )
 
 
-else:
+    if not st.session_state.annotations:
 
-    for annotation in (
-        st.session_state.annotations
-    ):
+        st.write(
+            "まだ登録されていません。"
+        )
 
-        annotation_id = annotation["id"]
+    else:
 
-        points = annotation[
-            "polyline_px"
-        ]
-
-
-        with st.expander(
-            f"ID {annotation_id} ｜ "
-            f"路線価 {annotation['road_value']} ｜ "
-            f"記号 {annotation['symbol']} ｜ "
-            f"{len(points)}点"
+        for annotation in (
+            st.session_state.annotations
         ):
 
-            st.json(
-                annotation
+            st.write(
+                f"ID {annotation['id']}  "
+                f"路線価："
+                f"{annotation['road_value']}  "
+                f"記号："
+                f"{annotation['symbol']}"
             )
 
 
             if st.button(
-                "このアノテーションを削除",
-                key=f"delete_{annotation_id}",
+                f"ID {annotation['id']} を削除",
+                key=f"delete_{annotation['id']}",
+                use_container_width=True
             ):
 
-                delete_annotation(
-                    annotation_id
-                )
+                st.session_state.annotations = [
+                    a
+                    for a in st.session_state.annotations
+                    if a["id"] != annotation["id"]
+                ]
+
+                # IDを振り直す
+                for i, a in enumerate(
+                    st.session_state.annotations,
+                    start=1
+                ):
+
+                    a["id"] = i
 
                 save_json()
 
                 st.rerun()
 
 
-# ============================================================
-# JSON
-# ============================================================
+    # =====================================================
+    # JSONダウンロード
+    # =====================================================
 
-st.divider()
-
-st.subheader(
-    "④ JSON"
-)
-
-
-if st.session_state.annotations:
+    st.divider()
 
     json_data = {
 
-        "image":
-            st.session_state.image_name,
+        "image": (
+            st.session_state.image_name
+        ),
 
-        "image_width":
-            st.session_state.image.width,
+        "image_width": (
+            st.session_state.image_width
+        ),
 
-        "image_height":
-            st.session_state.image.height,
+        "image_height": (
+            st.session_state.image_height
+        ),
 
-        "annotations":
-            st.session_state.annotations,
-
+        "annotations": (
+            st.session_state.annotations
+        )
     }
 
 
     json_string = json.dumps(
         json_data,
         ensure_ascii=False,
-        indent=2,
+        indent=2
     )
 
 
     st.download_button(
-        "⬇️ JSONをダウンロード",
+
+        label="JSONをダウンロード",
 
         data=json_string,
 
         file_name=(
-            f"{Path(st.session_state.image_name).stem}"
-            "_annotations.json"
+            Path(
+                st.session_state.image_name
+            ).stem
+            + "_annotations.json"
         ),
 
         mime="application/json",
 
-        use_container_width=True,
-    )
-
-
-    st.code(
-        json_string,
-        language="json",
-    )
-
-else:
-
-    st.info(
-        "アノテーションを登録するとJSONが表示されます。"
+        use_container_width=True
     )
