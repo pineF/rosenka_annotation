@@ -1,3 +1,4 @@
+```python
 import streamlit as st
 from streamlit_image_coordinates import streamlit_image_coordinates
 from PIL import Image, ImageDraw
@@ -51,6 +52,16 @@ if "zoom" not in st.session_state:
 if "last_click" not in st.session_state:
     st.session_state.last_click = None
 
+# ---------------------------------------------------------
+# 重要：
+# ボタン操作やアノテーション登録直後に、
+# streamlit-image-coordinates が直前のクリックを
+# もう一度返してきた場合、そのクリックを無視するための変数
+# ---------------------------------------------------------
+
+if "ignore_click" not in st.session_state:
+    st.session_state.ignore_click = None
+
 
 # =========================================================
 # JSON保存
@@ -70,14 +81,21 @@ def save_json():
         "annotations": st.session_state.annotations
     }
 
-    stem = Path(st.session_state.image_name).stem
+    stem = Path(
+        st.session_state.image_name
+    ).stem
 
     save_path = (
         Path("annotations")
         / f"{stem}_annotations.json"
     )
 
-    with open(save_path, "w", encoding="utf-8") as f:
+    with open(
+        save_path,
+        "w",
+        encoding="utf-8"
+    ) as f:
+
         json.dump(
             data,
             f,
@@ -98,17 +116,25 @@ def load_image(uploaded_file):
         BytesIO(image_bytes)
     ).convert("RGB")
 
-    st.session_state.image_name = uploaded_file.name
+    st.session_state.image_name = (
+        uploaded_file.name
+    )
 
-    # 元画像のバイトデータを保存
-    st.session_state.image_bytes = image_bytes
+    st.session_state.image_bytes = (
+        image_bytes
+    )
 
-    # PIL画像
-    st.session_state.original_image = image
+    st.session_state.original_image = (
+        image
+    )
 
-    # 元画像サイズ
-    st.session_state.image_width = image.width
-    st.session_state.image_height = image.height
+    st.session_state.image_width = (
+        image.width
+    )
+
+    st.session_state.image_height = (
+        image.height
+    )
 
     # アノテーション初期化
     st.session_state.annotations = []
@@ -116,8 +142,9 @@ def load_image(uploaded_file):
     # 現在作成中のポリライン初期化
     st.session_state.current_points = []
 
-    # 最後のクリック初期化
+    # クリック情報初期化
     st.session_state.last_click = None
+    st.session_state.ignore_click = None
 
     # ズーム初期化
     st.session_state.zoom = 1.0
@@ -126,8 +153,8 @@ def load_image(uploaded_file):
 # =========================================================
 # リサイズ画像
 #
-# @st.cache_data によって、
-# 同じ画像・同じズーム率なら再計算しない
+# @st.cache_data により、
+# 同じ画像・同じズーム率の場合は再計算しない
 # =========================================================
 
 @st.cache_data(max_entries=20)
@@ -166,11 +193,17 @@ def resize_image(
 
 if st.session_state.original_image is None:
 
-    st.subheader("路線価図画像を読み込む")
+    st.subheader(
+        "路線価図画像を読み込む"
+    )
 
     uploaded_file = st.file_uploader(
         "路線価図画像を選択してください",
-        type=["png", "jpg", "jpeg"]
+        type=[
+            "png",
+            "jpg",
+            "jpeg"
+        ]
     )
 
     if uploaded_file is not None:
@@ -185,7 +218,9 @@ if st.session_state.original_image is None:
             width="stretch"
         ):
 
-            load_image(uploaded_file)
+            load_image(
+                uploaded_file
+            )
 
             st.rerun()
 
@@ -226,13 +261,19 @@ with map_col:
 
     st.subheader("路線価図")
 
-    # -----------------------------------------------------
+
+    # =====================================================
     # ズーム操作
-    # -----------------------------------------------------
+    # =====================================================
 
     zoom_col1, zoom_col2, zoom_col3 = st.columns(
         [1, 2, 1]
     )
+
+
+    # -----------------------------------------------------
+    # ズームアウト
+    # -----------------------------------------------------
 
     with zoom_col1:
 
@@ -246,20 +287,38 @@ with map_col:
                 st.session_state.zoom - 0.25
             )
 
-            st.session_state.zoom = new_zoom
+            st.session_state.zoom = (
+                new_zoom
+            )
 
             st.rerun()
+
+
+    # -----------------------------------------------------
+    # 現在のズーム率
+    # -----------------------------------------------------
 
     with zoom_col2:
 
         st.markdown(
-            f"<div style='text-align:center; "
-            f"font-size:20px; "
-            f"padding-top:5px;'>"
-            f"<b>{int(st.session_state.zoom * 100)}%</b>"
-            f"</div>",
+            f"""
+            <div style="
+                text-align:center;
+                font-size:20px;
+                padding-top:5px;
+            ">
+                <b>
+                    {int(st.session_state.zoom * 100)}%
+                </b>
+            </div>
+            """,
             unsafe_allow_html=True
         )
+
+
+    # -----------------------------------------------------
+    # ズームイン
+    # -----------------------------------------------------
 
     with zoom_col3:
 
@@ -273,14 +332,16 @@ with map_col:
                 st.session_state.zoom + 0.25
             )
 
-            st.session_state.zoom = new_zoom
+            st.session_state.zoom = (
+                new_zoom
+            )
 
             st.rerun()
 
 
-    # -----------------------------------------------------
+    # =====================================================
     # 画像をリサイズ
-    # -----------------------------------------------------
+    # =====================================================
 
     display_image = resize_image(
         st.session_state.image_bytes,
@@ -299,22 +360,35 @@ with map_col:
     )
 
 
-    # -----------------------------------------------------
+    # =====================================================
     # 現在作成中のポリライン
-    # -----------------------------------------------------
+    # =====================================================
 
-    if len(st.session_state.current_points) >= 1:
+    if len(
+        st.session_state.current_points
+    ) >= 1:
 
         display_points = [
+
             (
-                int(x * st.session_state.zoom),
-                int(y * st.session_state.zoom)
+                int(
+                    x * st.session_state.zoom
+                ),
+
+                int(
+                    y * st.session_state.zoom
+                )
             )
+
             for x, y
             in st.session_state.current_points
         ]
 
-        # 線
+
+        # -------------------------------------------------
+        # ポリライン
+        # -------------------------------------------------
+
         if len(display_points) >= 2:
 
             draw.line(
@@ -322,15 +396,26 @@ with map_col:
                 fill="red",
                 width=max(
                     2,
-                    int(3 * st.session_state.zoom)
+                    int(
+                        3 *
+                        st.session_state.zoom
+                    )
                 )
             )
 
-        # 各点
+
+        # -------------------------------------------------
+        # 各クリック点
+        # -------------------------------------------------
+
         radius = max(
             4,
-            int(5 * st.session_state.zoom)
+            int(
+                5 *
+                st.session_state.zoom
+            )
         )
+
 
         for x, y in display_points:
 
@@ -345,16 +430,21 @@ with map_col:
                 outline="white",
                 width=max(
                     1,
-                    int(2 * st.session_state.zoom)
+                    int(
+                        2 *
+                        st.session_state.zoom
+                    )
                 )
             )
 
 
-    # -----------------------------------------------------
+    # =====================================================
     # 登録済みアノテーション
-    # -----------------------------------------------------
+    # =====================================================
 
-    for annotation in st.session_state.annotations:
+    for annotation in (
+        st.session_state.annotations
+    ):
 
         points = annotation.get(
             "polyline_px",
@@ -364,15 +454,30 @@ with map_col:
         if len(points) < 1:
             continue
 
+
         display_points = [
+
             (
-                int(x * st.session_state.zoom),
-                int(y * st.session_state.zoom)
+                int(
+                    x *
+                    st.session_state.zoom
+                ),
+
+                int(
+                    y *
+                    st.session_state.zoom
+                )
             )
-            for x, y in points
+
+            for x, y
+            in points
         ]
 
+
+        # -------------------------------------------------
         # ポリライン
+        # -------------------------------------------------
+
         if len(display_points) >= 2:
 
             draw.line(
@@ -380,17 +485,28 @@ with map_col:
                 fill="red",
                 width=max(
                     2,
-                    int(3 * st.session_state.zoom)
+                    int(
+                        3 *
+                        st.session_state.zoom
+                    )
                 )
             )
 
+
+        # -------------------------------------------------
         # 始点
+        # -------------------------------------------------
+
         x, y = display_points[0]
 
         radius = max(
             5,
-            int(6 * st.session_state.zoom)
+            int(
+                6 *
+                st.session_state.zoom
+            )
         )
+
 
         draw.ellipse(
             (
@@ -404,13 +520,19 @@ with map_col:
             width=2
         )
 
+
+        # -------------------------------------------------
         # ID
+        # -------------------------------------------------
+
         draw.text(
             (
                 x + radius + 3,
                 y - radius - 3
             ),
-            str(annotation["id"]),
+            str(
+                annotation["id"]
+            ),
             fill="red"
         )
 
@@ -425,31 +547,57 @@ with map_col:
     )
 
 
-    # -----------------------------------------------------
-    # クリック座標を元画像座標へ変換
-    # -----------------------------------------------------
+    # =====================================================
+    # クリック処理
+    # =====================================================
 
     if click is not None:
 
         click_x = click["x"]
         click_y = click["y"]
 
-        # 表示画像 → 元画像
+
+        # -------------------------------------------------
+        # 表示画像座標
+        # ↓
+        # 元画像座標
+        # -------------------------------------------------
+
         original_x = int(
-            click_x / st.session_state.zoom
+            click_x /
+            st.session_state.zoom
         )
 
         original_y = int(
-            click_y / st.session_state.zoom
+            click_y /
+            st.session_state.zoom
         )
+
 
         current_click = (
             original_x,
             original_y
         )
 
-        # 同じクリックイベントの二重登録防止
+
+        # =================================================
+        # ① ボタン操作・登録直後の
+        #    クリック再取得を無視
+        # =================================================
+
         if (
+            st.session_state.ignore_click
+            == current_click
+        ):
+
+            st.session_state.ignore_click = None
+
+
+        # =================================================
+        # ② 新しいクリック
+        # =================================================
+
+        elif (
             st.session_state.last_click
             != current_click
         ):
@@ -458,12 +606,14 @@ with map_col:
                 current_click
             )
 
+
             st.session_state.current_points.append(
                 [
                     original_x,
                     original_y
                 ]
             )
+
 
             st.rerun()
 
@@ -474,12 +624,14 @@ with map_col:
 
 with control_col:
 
-    st.subheader("アノテーション")
+    st.subheader(
+        "アノテーション"
+    )
 
 
-    # -----------------------------------------------------
+    # =====================================================
     # 現在の点数
-    # -----------------------------------------------------
+    # =====================================================
 
     st.write(
         f"現在の点数："
@@ -487,9 +639,9 @@ with control_col:
     )
 
 
-    # -----------------------------------------------------
+    # =====================================================
     # 現在の座標
-    # -----------------------------------------------------
+    # =====================================================
 
     if st.session_state.current_points:
 
@@ -503,9 +655,9 @@ with control_col:
             )
 
 
-    # -----------------------------------------------------
+    # =====================================================
     # 1点戻す
-    # -----------------------------------------------------
+    # =====================================================
 
     if st.button(
         "1点戻す",
@@ -514,47 +666,82 @@ with control_col:
 
         if st.session_state.current_points:
 
+            # ---------------------------------------------
+            # 削除する点を取得
+            # ---------------------------------------------
+
+            removed_point = (
+                st.session_state.current_points[-1]
+            )
+
+
+            # ---------------------------------------------
+            # 最後の点を削除
+            # ---------------------------------------------
+
             st.session_state.current_points.pop()
 
+
+            # ---------------------------------------------
+            # 同じクリックが再取得された場合、
+            # 再登録しない
+            # ---------------------------------------------
+
+            st.session_state.ignore_click = (
+                tuple(removed_point)
+            )
+
+
             st.session_state.last_click = None
+
 
             st.rerun()
 
 
-    # -----------------------------------------------------
+    # =====================================================
     # 現在の点をクリア
-    # -----------------------------------------------------
+    # =====================================================
 
     if st.button(
-    "現在の点をクリア",
-    width="stretch"
-):
+        "現在の点をクリア",
+        width="stretch"
+    ):
 
-    # 現在の最後のクリック位置を記録
-    # → rerun後に同じクリックを無視する
-    if st.session_state.current_points:
+        if st.session_state.current_points:
 
-        last_point = (
-            st.session_state.current_points[-1]
-        )
+            # ---------------------------------------------
+            # 最後のクリック位置を保存
+            # ---------------------------------------------
 
-        st.session_state.ignore_click = (
-            tuple(last_point)
-        )
+            last_point = (
+                st.session_state.current_points[-1]
+            )
 
-    st.session_state.current_points = []
 
-    st.session_state.last_click = None
+            st.session_state.ignore_click = (
+                tuple(last_point)
+            )
 
-    st.rerun()
+
+        # ---------------------------------------------
+        # 全点削除
+        # ---------------------------------------------
+
+        st.session_state.current_points = []
+
+
+        st.session_state.last_click = None
+
+
+        st.rerun()
 
 
     st.divider()
 
 
-    # -----------------------------------------------------
+    # =====================================================
     # 路線価
-    # -----------------------------------------------------
+    # =====================================================
 
     road_value = st.text_input(
         "路線価",
@@ -562,9 +749,9 @@ with control_col:
     )
 
 
-    # -----------------------------------------------------
+    # =====================================================
     # 記号
-    # -----------------------------------------------------
+    # =====================================================
 
     symbol = st.text_input(
         "記号",
@@ -572,9 +759,9 @@ with control_col:
     )
 
 
-    # -----------------------------------------------------
+    # =====================================================
     # アノテーション登録
-    # -----------------------------------------------------
+    # =====================================================
 
     if st.button(
         "アノテーション登録",
@@ -586,19 +773,32 @@ with control_col:
             st.session_state.current_points
         )
 
+
+        # -------------------------------------------------
         # 点数チェック
+        # -------------------------------------------------
+
         if len(points) < 2:
 
             st.warning(
                 "2点以上クリックしてください。"
             )
 
+
+        # -------------------------------------------------
         # 路線価チェック
+        # -------------------------------------------------
+
         elif road_value == "":
 
             st.warning(
                 "路線価を入力してください。"
             )
+
+
+        # -------------------------------------------------
+        # 登録
+        # -------------------------------------------------
 
         else:
 
@@ -608,39 +808,88 @@ with control_col:
                 ) + 1
             )
 
+
+            # ---------------------------------------------
+            # アノテーション作成
+            # ---------------------------------------------
+
             annotation = {
 
-                "id": annotation_id,
+                "id":
+                    annotation_id,
 
-                "road_value": road_value,
+                "road_value":
+                    road_value,
 
-                "symbol": symbol,
+                "symbol":
+                    symbol,
 
-                "polyline_px": points.copy(),
+                "polyline_px":
+                    points.copy(),
 
-                "start_point_px": points[0],
+                "start_point_px":
+                    points[0],
 
-                "end_point_px": points[-1],
+                "end_point_px":
+                    points[-1],
 
                 "created_at":
                     datetime.now().isoformat()
             }
 
+
+            # ---------------------------------------------
+            # 登録
+            # ---------------------------------------------
+
             st.session_state.annotations.append(
                 annotation
             )
 
-            # 現在のポリラインをクリア
+
+            # ---------------------------------------------
+            # ★重要
+            #
+            # 今回登録したアノテーションの終点を
+            # 保存しておく。
+            #
+            # rerun後に同じ終点が
+            # streamlit-image-coordinatesから
+            # 再取得されても、
+            # 次のアノテーションの始点にしない。
+            # ---------------------------------------------
+
+            last_point = points[-1]
+
+            st.session_state.ignore_click = (
+                tuple(last_point)
+            )
+
+
+            # ---------------------------------------------
+            # ★重要
+            #
+            # 次のアノテーションは
+            # 完全に0点からスタート
+            # ---------------------------------------------
+
             st.session_state.current_points = []
+
 
             st.session_state.last_click = None
 
+
+            # ---------------------------------------------
             # 自動保存
+            # ---------------------------------------------
+
             save_json()
+
 
             st.success(
                 f"ID {annotation_id} を登録しました。"
             )
+
 
             st.rerun()
 
@@ -652,7 +901,9 @@ with control_col:
     # 登録済みアノテーション
     # =====================================================
 
-    st.subheader("登録済み")
+    st.subheader(
+        "登録済み"
+    )
 
 
     if not st.session_state.annotations:
@@ -660,6 +911,7 @@ with control_col:
         st.write(
             "まだ登録されていません。"
         )
+
 
     else:
 
@@ -704,7 +956,10 @@ with control_col:
                 ]
 
 
+                # -----------------------------------------
                 # IDを振り直す
+                # -----------------------------------------
+
                 for i, a in enumerate(
                     st.session_state.annotations,
                     start=1
@@ -713,8 +968,12 @@ with control_col:
                     a["id"] = i
 
 
+                # -----------------------------------------
                 # JSON保存
+                # -----------------------------------------
+
                 save_json()
+
 
                 st.rerun()
 
@@ -772,7 +1031,7 @@ with control_col:
 
 
     # =====================================================
-    # 別の画像
+    # 別の画像を読み込む
     # =====================================================
 
     if st.button(
@@ -795,7 +1054,10 @@ with control_col:
         st.session_state.current_points = []
 
         st.session_state.last_click = None
+
         st.session_state.ignore_click = None
+
         st.session_state.zoom = 1.0
 
         st.rerun()
+```
