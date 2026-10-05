@@ -1,54 +1,40 @@
-import streamlit as st
-from PIL import Image
 import json
-import io
-import base64
 from datetime import datetime
+from io import BytesIO
+from pathlib import Path
+
+import streamlit as st
+from PIL import Image, ImageDraw, ImageFont
+
+from streamlit_image_coordinates import streamlit_image_coordinates
 
 
 # ============================================================
-# ページ設定
+# 基本設定
 # ============================================================
 
 st.set_page_config(
     page_title="路線価アノテーションツール",
     page_icon="🗺️",
-    layout="wide"
+    layout="wide",
 )
 
 
 # ============================================================
-# CSS
+# 定数
 # ============================================================
 
-st.markdown(
-    """
-    <style>
-    .annotation-info {
-        padding: 10px;
-        border-radius: 5px;
-        background-color: #f0f2f6;
-        margin-bottom: 10px;
-    }
+MIN_ZOOM = 0.5
+MAX_ZOOM = 4.0
+ZOOM_STEP = 0.25
 
-    .stButton button {
-        width: 100%;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True
-)
+SAVE_DIR = Path("annotations")
+SAVE_DIR.mkdir(exist_ok=True)
 
 
 # ============================================================
-# Session State 初期化
+# Session State
 # ============================================================
-
-if "annotations" not in st.session_state:
-    st.session_state.annotations = []
-
-if "current_points" not in st.session_state:
-    st.session_state.current_points = []
 
 if "image" not in st.session_state:
     st.session_state.image = None
@@ -56,27 +42,344 @@ if "image" not in st.session_state:
 if "image_name" not in st.session_state:
     st.session_state.image_name = None
 
+if "annotations" not in st.session_state:
+    st.session_state.annotations = []
+
+if "current_points" not in st.session_state:
+    st.session_state.current_points = []
+
+if "last_click_timestamp" not in st.session_state:
+    st.session_state.last_click_timestamp = None
+
+if "zoom" not in st.session_state:
+    st.session_state.zoom = 1.5
+
+if "auto_save" not in st.session_state:
+    st.session_state.auto_save = True
+
+
+# ============================================================
+# 関数
+# ============================================================
+
+def get_font(size=18):
+    """
+    画像上に文字を描画するためのフォントを取得する。
+    環境によって日本語フォントがない場合があるため、
+    見つからなければPILのデフォルトフォントを使用する。
+    """
+
+    font_candidates = [
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJKjp-Regular.otf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "C:/Windows/Fonts/meiryo.ttc",
+        "C:/Windows/Fonts/msgothic.ttc",
+    ]
+
+    for font_path in font_candidates:
+        if Path(font_path).exists():
+            try:
+                return ImageFont.truetype(font_path, size)
+            except Exception:
+                pass
+
+    return ImageFont.load_default()
+
+
+def draw_arrow(
+    draw,
+    points,
+    line_width=4,
+    point_radius=6,
+):
+    """
+    polylineと始点・終点を画像上に描画する。
+    """
+
+    if len(points) == 0:
+        return
+
+    # --------------------------------------------------------
+    # 点
+    # --------------------------------------------------------
+
+    for i, (x, y) in enumerate(points):
+
+        draw.ellipse(
+            (
+                x - point_radius,
+                y - point_radius,
+                x + point_radius,
+                y + point_radius,
+            ),
+            fill="red",
+            outline="white",
+            width=2,
+        )
+
+        # 点番号
+        font = get_font(16)
+
+        draw.text(
+            (x + 8, y - 20),
+            str(i + 1),
+            fill="red",
+            font=font,
+        )
+
+    # --------------------------------------------------------
+    # 線
+    # --------------------------------------------------------
+
+    if len(points) >= 2:
+
+        draw.line(
+            points,
+            fill="red",
+            width=line_width,
+            joint="curve",
+        )
+
+        # ----------------------------------------------------
+        # 終点に矢印
+        # ----------------------------------------------------
+
+        x1, y1 = points[-2]
+        x2, y2 = points[-1]
+
+        dx = x2 - x1
+        dy = y2 - y1
+
+        length = max((dx ** 2 + dy ** 2) ** 0.5, 1)
+
+        ux = dx / length
+        uy = dy / length
+
+        arrow_length = 25
+        arrow_width = 10
+
+        base_x = x2 - ux * arrow_length
+        base_y = y2 - uy * arrow_length
+
+        px = -uy
+        py = ux
+
+        p1 = (
+            x2,
+            y2,
+        )
+
+        p2 = (
+            base_x + px * arrow_width,
+            base_y + py * arrow_width,
+        )
+
+        p3 = (
+            base_x - px * arrow_width,
+            base_y - py * arrow_width,
+        )
+
+        draw.polygon(
+            [p1, p2, p3],
+            fill="red",
+        )
+
+
+def create_display_image():
+    """
+    現在の画像に、
+    ・登録済みアノテーション
+    ・現在作成中のpolyline
+    を描画して、ズーム倍率に応じた画像を返す。
+
+    座標そのものは常に元画像座標。
+    """
+
+    image = st.session_state.image
+
+    display_image = image.copy()
+
+    draw = ImageDraw.Draw(display_image)
+
+    # --------------------------------------------------------
+    # 登録済みアノテーション
+    # --------------------------------------------------------
+
+    for annotation in st.session_state.annotations:
+
+        points = annotation["polyline_px"]
+
+        if len(points) == 0:
+            continue
+
+        # 登録済みは青
+        if len(points) >= 2:
+
+            draw.line(
+                points,
+                fill="blue",
+                width=5,
+                joint="curve",
+            )
+
+            # 矢印
+            x1, y1 = points[-2]
+            x2, y2 = points[-1]
+
+            dx = x2 - x1
+            dy = y2 - y1
+
+            length = max((dx ** 2 + dy ** 2) ** 0.5, 1)
+
+            ux = dx / length
+            uy = dy / length
+
+            arrow_length = 25
+            arrow_width = 10
+
+            base_x = x2 - ux * arrow_length
+            base_y = y2 - uy * arrow_length
+
+            px = -uy
+            py = ux
+
+            draw.polygon(
+                [
+                    (x2, y2),
+                    (
+                        base_x + px * arrow_width,
+                        base_y + py * arrow_width,
+                    ),
+                    (
+                        base_x - px * arrow_width,
+                        base_y - py * arrow_width,
+                    ),
+                ],
+                fill="blue",
+            )
+
+        # ID表示
+        x, y = points[0]
+
+        font = get_font(24)
+
+        draw.text(
+            (x + 10, y + 10),
+            str(annotation["id"]),
+            fill="blue",
+            font=font,
+        )
+
+    # --------------------------------------------------------
+    # 現在作成中のpolyline
+    # --------------------------------------------------------
+
+    if st.session_state.current_points:
+
+        draw_arrow(
+            draw,
+            st.session_state.current_points,
+            line_width=5,
+            point_radius=7,
+        )
+
+    # --------------------------------------------------------
+    # ズーム
+    # --------------------------------------------------------
+
+    zoom = st.session_state.zoom
+
+    width = int(image.width * zoom)
+    height = int(image.height * zoom)
+
+    if zoom != 1.0:
+
+        display_image = display_image.resize(
+            (width, height),
+            Image.Resampling.LANCZOS,
+        )
+
+    return display_image
+
+
+def save_json():
+    """
+    現在のアノテーションをJSONとして保存。
+    """
+
+    if st.session_state.image is None:
+        return None
+
+    data = {
+        "image": st.session_state.image_name,
+        "image_width": st.session_state.image.width,
+        "image_height": st.session_state.image.height,
+        "created_at": datetime.now().isoformat(),
+        "annotations": st.session_state.annotations,
+    }
+
+    json_string = json.dumps(
+        data,
+        ensure_ascii=False,
+        indent=2,
+    )
+
+    # ローカル保存
+    if st.session_state.image_name:
+
+        image_stem = Path(
+            st.session_state.image_name
+        ).stem
+
+        save_path = SAVE_DIR / f"{image_stem}.json"
+
+        save_path.write_text(
+            json_string,
+            encoding="utf-8",
+        )
+
+    return json_string
+
+
+def reset_current_points():
+    """
+    作成中のpolylineを全削除。
+    """
+
+    st.session_state.current_points = []
+
+
+def undo_point():
+    """
+    現在作成中のpolylineの最後の1点を削除。
+    """
+
+    if st.session_state.current_points:
+
+        st.session_state.current_points.pop()
+
+
+def delete_annotation(annotation_id):
+    """
+    登録済みアノテーションを削除。
+    """
+
+    st.session_state.annotations = [
+        annotation
+        for annotation in st.session_state.annotations
+        if annotation["id"] != annotation_id
+    ]
+
 
 # ============================================================
 # タイトル
 # ============================================================
 
-st.title("🗺️ 路線価画像アノテーションツール")
+st.title("🗺️ 路線価アノテーションツール")
 
-st.markdown(
-    """
-    路線価図の画像上で、**路線価を表す矢印の位置と、それに対応する路線価・記号**
-    をアノテーションするためのツールです。
-
-    ### アノテーション方法
-
-    1. 路線価画像をアップロード
-    2. 矢印の **始点 → 経由点 → 終点** の順番にクリック
-    3. 矢印に対応する **路線価** を入力
-    4. **路線価の記号**を選択
-    5. 「アノテーションを追加」を押す
-    6. 最後にJSONをダウンロード
-    """
+st.caption(
+    "路線価図の矢印・路線価・記号をアノテーションします。"
 )
 
 
@@ -89,500 +392,413 @@ with st.sidebar:
     st.header("画像")
 
     uploaded_file = st.file_uploader(
-        "路線価画像をアップロード",
-        type=["png", "jpg", "jpeg", "webp"]
+        "路線価画像を選択",
+        type=[
+            "png",
+            "jpg",
+            "jpeg",
+            "webp",
+            "tif",
+            "tiff",
+        ],
     )
+
+    # --------------------------------------------------------
+    # 画像読み込み
+    # --------------------------------------------------------
 
     if uploaded_file is not None:
 
-        image = Image.open(uploaded_file).convert("RGB")
+        # 新しい画像が選択されたか確認
+        if (
+            st.session_state.image_name
+            != uploaded_file.name
+        ):
 
-        st.session_state.image = image
-        st.session_state.image_name = uploaded_file.name
+            image = Image.open(
+                uploaded_file
+            ).convert("RGB")
 
-        st.write(f"画像サイズ: {image.width} × {image.height}")
+            st.session_state.image = image
 
-    st.divider()
+            st.session_state.image_name = (
+                uploaded_file.name
+            )
 
-    st.header("アノテーション")
+            st.session_state.annotations = []
+
+            st.session_state.current_points = []
+
+            st.session_state.last_click_timestamp = None
 
     if st.session_state.image is not None:
 
         st.write(
-            f"登録済み: {len(st.session_state.annotations)} 件"
+            f"**画像:** {st.session_state.image_name}"
         )
 
-        if st.button("現在のアノテーションを全削除"):
-            st.session_state.annotations = []
-            st.session_state.current_points = []
-            st.rerun()
+        st.write(
+            f"**サイズ:** "
+            f"{st.session_state.image.width} × "
+            f"{st.session_state.image.height} px"
+        )
 
     st.divider()
 
-    st.header("JSON")
+    # ========================================================
+    # ズーム
+    # ========================================================
 
-    if st.session_state.annotations:
+    st.header("表示設定")
 
-        json_data = {
-            "image": st.session_state.image_name,
-            "image_width": st.session_state.image.width,
-            "image_height": st.session_state.image.height,
-            "annotations": st.session_state.annotations
-        }
+    st.session_state.zoom = st.slider(
+        "ズーム倍率",
+        min_value=MIN_ZOOM,
+        max_value=MAX_ZOOM,
+        value=st.session_state.zoom,
+        step=ZOOM_STEP,
+    )
 
-        json_string = json.dumps(
-            json_data,
-            ensure_ascii=False,
-            indent=2
-        )
+    st.caption(
+        f"現在の倍率: {st.session_state.zoom:.2f}倍"
+    )
 
-        st.download_button(
-            label="JSONをダウンロード",
-            data=json_string,
-            file_name="rosenka_annotations.json",
-            mime="application/json"
-        )
+    st.divider()
+
+    # ========================================================
+    # 自動保存
+    # ========================================================
+
+    st.session_state.auto_save = st.checkbox(
+        "アノテーション追加時に自動保存",
+        value=True,
+    )
+
+    st.caption(
+        "JSONは annotations フォルダにも保存されます。"
+    )
 
 
 # ============================================================
-# 画像がアップロードされていない場合
+# 画像がない場合
 # ============================================================
 
 if st.session_state.image is None:
 
-    st.info("左側のサイドバーから路線価画像をアップロードしてください。")
+    st.info(
+        "左側から路線価画像をアップロードしてください。"
+    )
 
     st.stop()
 
 
 # ============================================================
-# 画像表示用HTML
-# ============================================================
-
-def image_to_base64(image):
-
-    buffer = io.BytesIO()
-
-    image.save(buffer, format="PNG")
-
-    return base64.b64encode(
-        buffer.getvalue()
-    ).decode()
-
-
-# ============================================================
-# 現在のアノテーション情報
-# ============================================================
-
-st.subheader("1. 矢印をクリックして座標を指定")
-
-st.markdown(
-    """
-    **直線の場合**
-
-    `始点 → 終点`
-
-    **カーブしている場合**
-
-    `始点 → 経由点 → 経由点 → 終点`
-
-    の順番でクリックしてください。
-    """
-)
-
-
-# ============================================================
-# 画像上のクリック処理
+# メイン画面
 # ============================================================
 
 image = st.session_state.image
 
-image_b64 = image_to_base64(image)
-
-
-# JavaScript + Streamlit component風のクリック処理
-# ------------------------------------------------------------
-
-component_html = f"""
-<div style="width:100%;">
-
-    <div
-        id="image-container"
-        style="
-            position:relative;
-            width:100%;
-            overflow:auto;
-            border:1px solid #cccccc;
-            background:#eeeeee;
-        "
-    >
-
-        <img
-            id="main-image"
-            src="data:image/png;base64,{image_b64}"
-            style="
-                width:100%;
-                height:auto;
-                display:block;
-                cursor:crosshair;
-            "
-        />
-
-        <canvas
-            id="canvas"
-            style="
-                position:absolute;
-                left:0;
-                top:0;
-                width:100%;
-                height:100%;
-                pointer-events:none;
-            "
-        >
-        </canvas>
-
-    </div>
-
-    <div style="margin-top:10px;">
-        <button
-            id="clear-button"
-            style="
-                padding:8px 15px;
-                margin-right:10px;
-                cursor:pointer;
-            "
-        >
-            現在の点をクリア
-        </button>
-
-        <span id="point-info">
-            クリック待機中
-        </span>
-    </div>
-
-</div>
-
-
-<script>
-
-const image = document.getElementById("main-image");
-const canvas = document.getElementById("canvas");
-const ctx = canvas.getContext("2d");
-const info = document.getElementById("point-info");
-const clearButton = document.getElementById("clear-button");
-
-let points = [];
-
-
-function resizeCanvas() {{
-
-    canvas.width = image.clientWidth;
-    canvas.height = image.clientHeight;
-
-    draw();
-
-}}
-
-
-function draw() {{
-
-    ctx.clearRect(
-        0,
-        0,
-        canvas.width,
-        canvas.height
-    );
-
-    if (points.length === 0) {{
-        return;
-    }}
-
-    // 線を描画
-    ctx.beginPath();
-
-    ctx.moveTo(
-        points[0].x * canvas.width,
-        points[0].y * canvas.height
-    );
-
-    for (let i = 1; i < points.length; i++) {{
-
-        ctx.lineTo(
-            points[i].x * canvas.width,
-            points[i].y * canvas.height
-        );
-
-    }}
-
-    ctx.strokeStyle = "red";
-    ctx.lineWidth = 3;
-    ctx.stroke();
-
-
-    // 点を描画
-    for (let i = 0; i < points.length; i++) {{
-
-        const x = points[i].x * canvas.width;
-        const y = points[i].y * canvas.height;
-
-        ctx.beginPath();
-
-        ctx.arc(
-            x,
-            y,
-            5,
-            0,
-            Math.PI * 2
-        );
-
-        ctx.fillStyle = "blue";
-        ctx.fill();
-
-        ctx.strokeStyle = "white";
-        ctx.lineWidth = 2;
-        ctx.stroke();
-
-        // 番号
-        ctx.fillStyle = "black";
-        ctx.font = "bold 14px Arial";
-
-        ctx.fillText(
-            i + 1,
-            x + 8,
-            y - 8
-        );
-    }}
-
-    info.innerText =
-        points.length + " 点選択中";
-
-}}
-
-
-image.addEventListener("load", resizeCanvas);
-
-window.addEventListener("resize", resizeCanvas);
-
-
-image.addEventListener("click", function(event) {{
-
-    const rect = image.getBoundingClientRect();
-
-    const x = event.clientX - rect.left;
-    const y = event.clientY - rect.top;
-
-    // 画像サイズに対する割合
-    const normalizedX = x / rect.width;
-    const normalizedY = y / rect.height;
-
-    points.push({{
-        x: normalizedX,
-        y: normalizedY
-    }});
-
-    draw();
-
-}});
-
-
-clearButton.addEventListener("click", function() {{
-
-    points = [];
-
-    draw();
-
-    info.innerText = "現在の点をクリアしました";
-
-}});
-
-
-resizeCanvas();
-
-</script>
-"""
-
-
-# Streamlit HTML表示
-st.components.v1.html(
-    component_html,
-    height=700,
-    scrolling=True
-)
-
 
 # ============================================================
-# 座標入力
+# 操作説明
 # ============================================================
 
-st.subheader("2. 矢印の座標")
+st.subheader("① 矢印を作成")
 
-st.warning(
+st.markdown(
     """
-    現在のバージョンでは、画像上のクリック座標を
-    ブラウザ側で取得して表示する基本機能を実装しています。
+    **始点 → 経由点 → 終点** の順に画像をクリックしてください。
+
+    - 直線：2点
+    - 曲線：3点以上
+    - 拡大して細かい位置をクリックできます
+    - 保存される座標は元画像のピクセル座標です
     """
 )
 
 
 # ============================================================
-# 手動座標入力
+# 現在の状態
 # ============================================================
 
-st.markdown("### 座標を入力")
-
-st.caption(
-    "画像左上を (0, 0)、右下を (画像幅, 画像高さ) とするピクセル座標です。"
-)
-
-
-if "manual_points" not in st.session_state:
-    st.session_state.manual_points = []
-
-
-col1, col2 = st.columns(2)
+col1, col2, col3 = st.columns(3)
 
 with col1:
 
-    x = st.number_input(
-        "X座標",
-        min_value=0,
-        max_value=image.width,
-        value=0,
-        step=1
+    st.metric(
+        "現在の点数",
+        len(st.session_state.current_points),
     )
 
 with col2:
 
-    y = st.number_input(
-        "Y座標",
-        min_value=0,
-        max_value=image.height,
-        value=0,
-        step=1
+    st.metric(
+        "登録済み",
+        len(st.session_state.annotations),
+    )
+
+with col3:
+
+    st.metric(
+        "ズーム",
+        f"{st.session_state.zoom:.2f}×",
     )
 
 
-if st.button("座標を追加"):
+# ============================================================
+# 画像生成
+# ============================================================
 
-    st.session_state.manual_points.append(
-        [int(x), int(y)]
-    )
+display_image = create_display_image()
 
-    st.rerun()
+display_width = display_image.width
 
 
-if st.session_state.manual_points:
+# ============================================================
+# 画像クリック
+# ============================================================
 
-    st.write("現在の座標")
+clicked = streamlit_image_coordinates(
+    display_image,
+    width=display_width,
+    cursor="crosshair",
+    key="rosenka_image",
+)
 
-    for i, point in enumerate(
-        st.session_state.manual_points
-    ):
 
-        st.write(
-            f"{i + 1}: ({point[0]}, {point[1]})"
+# ============================================================
+# クリックされた座標を取得
+# ============================================================
+
+if clicked is not None:
+
+    timestamp = clicked.get("timestamp")
+
+    # 同じクリックイベントを何度も追加しない
+    if timestamp != st.session_state.last_click_timestamp:
+
+        st.session_state.last_click_timestamp = timestamp
+
+        clicked_x = clicked["x"]
+        clicked_y = clicked["y"]
+
+        zoom = st.session_state.zoom
+
+        # 表示画像上の座標
+        # ↓
+        # 元画像の座標へ変換
+        original_x = round(
+            clicked_x / zoom
         )
 
+        original_y = round(
+            clicked_y / zoom
+        )
 
-    if st.button("座標をすべてクリア"):
+        # 画像範囲内に収める
+        original_x = max(
+            0,
+            min(
+                original_x,
+                image.width - 1,
+            ),
+        )
 
-        st.session_state.manual_points = []
+        original_y = max(
+            0,
+            min(
+                original_y,
+                image.height - 1,
+            ),
+        )
+
+        st.session_state.current_points.append(
+            [
+                original_x,
+                original_y,
+            ]
+        )
 
         st.rerun()
 
 
 # ============================================================
-# 路線価情報
+# 現在の点の操作
+# ============================================================
+
+st.markdown("### 現在の矢印")
+
+col1, col2, col3 = st.columns(3)
+
+with col1:
+
+    if st.button(
+        "↩️ 1点戻す",
+        use_container_width=True,
+        disabled=(
+            len(
+                st.session_state.current_points
+            )
+            == 0
+        ),
+    ):
+
+        undo_point()
+
+        st.rerun()
+
+
+with col2:
+
+    if st.button(
+        "🗑️ 全点クリア",
+        use_container_width=True,
+        disabled=(
+            len(
+                st.session_state.current_points
+            )
+            == 0
+        ),
+    ):
+
+        reset_current_points()
+
+        st.rerun()
+
+
+with col3:
+
+    if st.button(
+        "🔄 表示を更新",
+        use_container_width=True,
+    ):
+
+        st.rerun()
+
+
+# ============================================================
+# 現在の座標表示
+# ============================================================
+
+if st.session_state.current_points:
+
+    st.write("現在のpolyline座標:")
+
+    st.code(
+        json.dumps(
+            st.session_state.current_points,
+            ensure_ascii=False,
+            indent=2,
+        ),
+        language="json",
+    )
+
+
+# ============================================================
+# アノテーション情報
 # ============================================================
 
 st.divider()
 
-st.subheader("3. 路線価情報")
+st.subheader("② 路線価・記号を入力")
+
 
 col1, col2 = st.columns(2)
-
 
 with col1:
 
     road_value = st.text_input(
         "路線価",
-        placeholder="例：120"
+        placeholder="例：120",
+        key="road_value_input",
     )
-
 
 with col2:
 
-    symbol = st.selectbox(
+    symbol = st.text_input(
         "路線価の記号",
-        [
-            "なし",
-            "A",
-            "B",
-            "C",
-            "D",
-            "E",
-            "F",
-            "G",
-            "H",
-            "その他"
-        ]
+        placeholder="例：A",
+        key="symbol_input",
     )
-
-
-if symbol == "その他":
-
-    symbol_other = st.text_input(
-        "記号を入力"
-    )
-
-else:
-
-    symbol_other = ""
 
 
 # ============================================================
 # アノテーション追加
 # ============================================================
 
-st.divider()
-
-st.subheader("4. アノテーションを登録")
+st.subheader("③ アノテーションを登録")
 
 
 if st.button(
-    "アノテーションを追加",
-    type="primary"
+    "＋ アノテーションを追加",
+    type="primary",
+    use_container_width=True,
 ):
 
-    if not road_value:
+    # --------------------------------------------------------
+    # 入力チェック
+    # --------------------------------------------------------
 
-        st.error("路線価を入力してください。")
-
-    elif len(st.session_state.manual_points) < 2:
+    if len(
+        st.session_state.current_points
+    ) < 2:
 
         st.error(
-            "矢印には最低2点（始点・終点）が必要です。"
+            "矢印には最低2点が必要です。"
+            "始点と終点をクリックしてください。"
+        )
+
+    elif not road_value.strip():
+
+        st.error(
+            "路線価を入力してください。"
+        )
+
+    elif not symbol.strip():
+
+        st.error(
+            "路線価の記号を入力してください。"
         )
 
     else:
 
-        final_symbol = (
-            symbol_other
-            if symbol == "その他"
-            else symbol
-        )
+        # ----------------------------------------------------
+        # ID
+        # ----------------------------------------------------
 
-        points = st.session_state.manual_points
+        if st.session_state.annotations:
+
+            new_id = max(
+                annotation["id"]
+                for annotation
+                in st.session_state.annotations
+            ) + 1
+
+        else:
+
+            new_id = 1
+
+        # ----------------------------------------------------
+        # 座標
+        # ----------------------------------------------------
+
+        points = [
+            point.copy()
+            for point
+            in st.session_state.current_points
+        ]
+
+        # ----------------------------------------------------
+        # アノテーション
+        # ----------------------------------------------------
 
         annotation = {
 
-            "id": len(
-                st.session_state.annotations
-            ) + 1,
+            "id": new_id,
 
-            "road_value": road_value,
+            "road_value": road_value.strip(),
 
-            "symbol": final_symbol,
+            "symbol": symbol.strip(),
 
             "polyline_px": points,
 
@@ -590,22 +806,30 @@ if st.button(
 
             "end_point_px": points[-1],
 
-            "created_at": datetime.now().isoformat()
+            "created_at": datetime.now().isoformat(),
 
         }
-
 
         st.session_state.annotations.append(
             annotation
         )
 
+        # ----------------------------------------------------
+        # 現在のpolylineをリセット
+        # ----------------------------------------------------
 
-        # 次のアノテーションに備えてクリア
-        st.session_state.manual_points = []
+        st.session_state.current_points = []
 
+        # ----------------------------------------------------
+        # 自動保存
+        # ----------------------------------------------------
+
+        if st.session_state.auto_save:
+
+            save_json()
 
         st.success(
-            f"アノテーション {annotation['id']} を登録しました。"
+            f"アノテーション ID {new_id} を登録しました。"
         )
 
         st.rerun()
@@ -617,54 +841,108 @@ if st.button(
 
 st.divider()
 
-st.subheader("5. 登録済みアノテーション")
+st.subheader("④ 登録済みアノテーション")
 
 
 if not st.session_state.annotations:
 
     st.info(
-        "まだアノテーションは登録されていません。"
+        "まだアノテーションはありません。"
     )
 
 else:
 
     for annotation in st.session_state.annotations:
 
+        annotation_id = annotation["id"]
+
+        points = annotation["polyline_px"]
+
         with st.expander(
-            f"ID {annotation['id']} "
-            f"｜ 路線価 {annotation['road_value']} "
-            f"｜ 記号 {annotation['symbol']}"
+            f"ID {annotation_id} ｜ "
+            f"路線価: {annotation['road_value']} ｜ "
+            f"記号: {annotation['symbol']} ｜ "
+            f"{len(points)}点"
         ):
 
-            st.json(annotation)
+            col1, col2 = st.columns([4, 1])
+
+            with col1:
+
+                st.write(
+                    f"**始点:** "
+                    f"{annotation['start_point_px']}"
+                )
+
+                st.write(
+                    f"**終点:** "
+                    f"{annotation['end_point_px']}"
+                )
+
+                st.write(
+                    f"**polyline:** "
+                    f"{len(points)}点"
+                )
+
+                st.json(annotation)
+
+            with col2:
+
+                if st.button(
+                    "削除",
+                    key=f"delete_{annotation_id}",
+                    use_container_width=True,
+                ):
+
+                    delete_annotation(
+                        annotation_id
+                    )
+
+                    if st.session_state.auto_save:
+                        save_json()
+
+                    st.rerun()
 
 
 # ============================================================
-# JSONプレビュー
+# JSON
 # ============================================================
 
 st.divider()
 
-st.subheader("JSONプレビュー")
+st.subheader("⑤ JSON")
 
 
 if st.session_state.annotations:
 
-    output_data = {
-
+    json_data = {
         "image": st.session_state.image_name,
-
         "image_width": image.width,
-
         "image_height": image.height,
-
-        "annotations":
-            st.session_state.annotations
-
+        "annotations": st.session_state.annotations,
     }
 
+    json_string = json.dumps(
+        json_data,
+        ensure_ascii=False,
+        indent=2,
+    )
 
-    st.json(output_data)
+    st.download_button(
+        "⬇️ JSONをダウンロード",
+        data=json_string,
+        file_name=(
+            f"{Path(st.session_state.image_name).stem}"
+            "_annotations.json"
+        ),
+        mime="application/json",
+        use_container_width=True,
+    )
+
+    st.code(
+        json_string,
+        language="json",
+    )
 
 else:
 
@@ -672,3 +950,14 @@ else:
         "アノテーションを登録するとJSONが表示されます。"
     )
 
+
+# ============================================================
+# 保存状況
+# ============================================================
+
+st.divider()
+
+st.caption(
+    "アノテーションを追加すると、annotations フォルダへ "
+    "JSONが自動保存されます（自動保存ONの場合）。"
+)
