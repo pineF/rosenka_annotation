@@ -20,8 +20,6 @@ if "next_id" not in st.session_state:
     st.session_state.next_id = 1  # 新規アノテーションIDカウンタ
 if "json_load_warning" not in st.session_state:
     st.session_state.json_load_warning = None
-if "canvas_revision" not in st.session_state:
-    st.session_state.canvas_revision = 0
 if "last_canvas_object_signature" not in st.session_state:
     st.session_state.last_canvas_object_signature = None
 
@@ -172,17 +170,18 @@ if uploaded_image is not None:
                     height=disp_h,
                     width=disp_w,
                     drawing_mode="point",
-                    key=(
-                        f"canvas_{zoom_percent}_{st.session_state.editing_id}_"
-                        f"{st.session_state.canvas_revision}"
-                    ),
+                    key=f"canvas_{zoom_percent}_{st.session_state.editing_id}",
                 )
 
+            canvas_objects = (
+                canvas_result.json_data.get("objects", [])
+                if canvas_result.json_data
+                else []
+            )
             if canvas_result.json_data and canvas_result.json_data.get("objects"):
-                objects = canvas_result.json_data["objects"]
-                last_obj = objects[-1]
+                last_obj = canvas_objects[-1]
                 object_signature = (
-                    len(objects),
+                    len(canvas_objects),
                     last_obj.get("left"),
                     last_obj.get("top"),
                 )
@@ -215,14 +214,24 @@ if uploaded_image is not None:
                 if st.button("↩️ 1つ戻す（最後の点を削除）"):
                     if st.session_state.current_points:
                         st.session_state.current_points.pop()
-                    st.session_state.last_canvas_object_signature = None
-                    st.session_state.canvas_revision += 1
+                    if canvas_objects:
+                        last_obj = canvas_objects[-1]
+                        st.session_state.last_canvas_object_signature = (
+                            len(canvas_objects),
+                            last_obj.get("left"),
+                            last_obj.get("top"),
+                        )
                     st.rerun(scope="fragment")
             with c_btn2:
                 if st.button("🗑️ すべてクリア"):
                     st.session_state.current_points = []
-                    st.session_state.last_canvas_object_signature = None
-                    st.session_state.canvas_revision += 1
+                    if canvas_objects:
+                        last_obj = canvas_objects[-1]
+                        st.session_state.last_canvas_object_signature = (
+                            len(canvas_objects),
+                            last_obj.get("left"),
+                            last_obj.get("top"),
+                        )
                     st.rerun(scope="fragment")
 
             st.write(
