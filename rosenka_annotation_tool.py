@@ -52,14 +52,13 @@ if "last_click" not in st.session_state:
     st.session_state.last_click = None
 
 # ---------------------------------------------------------
-# 重要：
-# ボタン操作やアノテーション登録直後に、
-# streamlit-image-coordinates が直前のクリックを
-# もう一度返してきた場合、そのクリックを無視するための変数
+# ボタン操作や登録直後に、
+# 直前のクリックイベントが再取得された場合に
+# そのクリックを無視するためのフラグ
 # ---------------------------------------------------------
 
-if "ignore_click" not in st.session_state:
-    st.session_state.ignore_click = None
+if "waiting_for_new_click" not in st.session_state:
+    st.session_state.waiting_for_new_click = False
 
 
 # =========================================================
@@ -141,9 +140,9 @@ def load_image(uploaded_file):
     # 現在作成中のポリライン初期化
     st.session_state.current_points = []
 
-    # クリック情報初期化
+    # クリック状態初期化
     st.session_state.last_click = None
-    st.session_state.ignore_click = None
+    st.session_state.waiting_for_new_click = False
 
     # ズーム初期化
     st.session_state.zoom = 1.0
@@ -152,8 +151,7 @@ def load_image(uploaded_file):
 # =========================================================
 # リサイズ画像
 #
-# @st.cache_data により、
-# 同じ画像・同じズーム率の場合は再計算しない
+# 同じ画像・同じズーム率ならキャッシュを利用
 # =========================================================
 
 @st.cache_data(max_entries=20)
@@ -281,20 +279,16 @@ with map_col:
             width="stretch"
         ):
 
-            new_zoom = max(
+            st.session_state.zoom = max(
                 0.25,
                 st.session_state.zoom - 0.25
-            )
-
-            st.session_state.zoom = (
-                new_zoom
             )
 
             st.rerun()
 
 
     # -----------------------------------------------------
-    # 現在のズーム率
+    # ズーム率
     # -----------------------------------------------------
 
     with zoom_col2:
@@ -326,13 +320,9 @@ with map_col:
             width="stretch"
         ):
 
-            new_zoom = min(
+            st.session_state.zoom = min(
                 4.0,
                 st.session_state.zoom + 0.25
-            )
-
-            st.session_state.zoom = (
-                new_zoom
             )
 
             st.rerun()
@@ -371,11 +361,13 @@ with map_col:
 
             (
                 int(
-                    x * st.session_state.zoom
+                    x *
+                    st.session_state.zoom
                 ),
 
                 int(
-                    y * st.session_state.zoom
+                    y *
+                    st.session_state.zoom
                 )
             )
 
@@ -384,10 +376,7 @@ with map_col:
         ]
 
 
-        # -------------------------------------------------
         # ポリライン
-        # -------------------------------------------------
-
         if len(display_points) >= 2:
 
             draw.line(
@@ -403,10 +392,7 @@ with map_col:
             )
 
 
-        # -------------------------------------------------
-        # 各クリック点
-        # -------------------------------------------------
-
+        # クリックした点
         radius = max(
             4,
             int(
@@ -473,10 +459,7 @@ with map_col:
         ]
 
 
-        # -------------------------------------------------
         # ポリライン
-        # -------------------------------------------------
-
         if len(display_points) >= 2:
 
             draw.line(
@@ -492,10 +475,7 @@ with map_col:
             )
 
 
-        # -------------------------------------------------
         # 始点
-        # -------------------------------------------------
-
         x, y = display_points[0]
 
         radius = max(
@@ -520,10 +500,7 @@ with map_col:
         )
 
 
-        # -------------------------------------------------
         # ID
-        # -------------------------------------------------
-
         draw.text(
             (
                 x + radius + 3,
@@ -580,20 +557,42 @@ with map_col:
 
 
         # =================================================
-        # ① ボタン操作・登録直後の
-        #    クリック再取得を無視
+        # ボタン操作・登録直後
+        #
+        # 直前のクリックが再取得された場合は無視
         # =================================================
 
-        if (
-            st.session_state.ignore_click
-            == current_click
-        ):
+        if st.session_state.waiting_for_new_click:
 
-            st.session_state.ignore_click = None
+            # 同じクリックなら無視
+            if (
+                st.session_state.last_click
+                == current_click
+            ):
+
+                pass
+
+            # 新しい場所をクリックした場合
+            else:
+
+                st.session_state.waiting_for_new_click = False
+
+                st.session_state.last_click = (
+                    current_click
+                )
+
+                st.session_state.current_points.append(
+                    [
+                        original_x,
+                        original_y
+                    ]
+                )
+
+                st.rerun()
 
 
         # =================================================
-        # ② 新しいクリック
+        # 通常のクリック
         # =================================================
 
         elif (
@@ -605,14 +604,12 @@ with map_col:
                 current_click
             )
 
-
             st.session_state.current_points.append(
                 [
                     original_x,
                     original_y
                 ]
             )
-
 
             st.rerun()
 
@@ -665,34 +662,12 @@ with control_col:
 
         if st.session_state.current_points:
 
-            # ---------------------------------------------
-            # 削除する点を取得
-            # ---------------------------------------------
-
-            removed_point = (
-                st.session_state.current_points[-1]
-            )
-
-
-            # ---------------------------------------------
             # 最後の点を削除
-            # ---------------------------------------------
-
             st.session_state.current_points.pop()
 
-
-            # ---------------------------------------------
-            # 同じクリックが再取得された場合、
-            # 再登録しない
-            # ---------------------------------------------
-
-            st.session_state.ignore_click = (
-                tuple(removed_point)
-            )
-
-
-            st.session_state.last_click = None
-
+            # Streamlitの再実行時に
+            # 直前のクリックを再登録しない
+            st.session_state.waiting_for_new_click = True
 
             st.rerun()
 
@@ -706,31 +681,12 @@ with control_col:
         width="stretch"
     ):
 
-        if st.session_state.current_points:
-
-            # ---------------------------------------------
-            # 最後のクリック位置を保存
-            # ---------------------------------------------
-
-            last_point = (
-                st.session_state.current_points[-1]
-            )
-
-
-            st.session_state.ignore_click = (
-                tuple(last_point)
-            )
-
-
-        # ---------------------------------------------
         # 全点削除
-        # ---------------------------------------------
-
         st.session_state.current_points = []
 
-
-        st.session_state.last_click = None
-
+        # 直前のクリックイベントを
+        # 次の新しいクリックまで無視
+        st.session_state.waiting_for_new_click = True
 
         st.rerun()
 
@@ -808,10 +764,6 @@ with control_col:
             )
 
 
-            # ---------------------------------------------
-            # アノテーション作成
-            # ---------------------------------------------
-
             annotation = {
 
                 "id":
@@ -838,7 +790,7 @@ with control_col:
 
 
             # ---------------------------------------------
-            # 登録
+            # アノテーション登録
             # ---------------------------------------------
 
             st.session_state.annotations.append(
@@ -849,33 +801,19 @@ with control_col:
             # ---------------------------------------------
             # ★重要
             #
-            # 今回登録したアノテーションの終点を
-            # 保存しておく。
-            #
-            # rerun後に同じ終点が
-            # streamlit-image-coordinatesから
-            # 再取得されても、
-            # 次のアノテーションの始点にしない。
-            # ---------------------------------------------
-
-            last_point = points[-1]
-
-            st.session_state.ignore_click = (
-                tuple(last_point)
-            )
-
-
-            # ---------------------------------------------
-            # ★重要
-            #
-            # 次のアノテーションは
-            # 完全に0点からスタート
+            # 次のアノテーションは0点から開始
             # ---------------------------------------------
 
             st.session_state.current_points = []
 
 
-            st.session_state.last_click = None
+            # ---------------------------------------------
+            # 登録直前の終点クリックが
+            # 再取得されても、
+            # 次の始点にしない
+            # ---------------------------------------------
+
+            st.session_state.waiting_for_new_click = True
 
 
             # ---------------------------------------------
@@ -901,7 +839,7 @@ with control_col:
     # =====================================================
 
     st.subheader(
-        "登録済み"
+        f"登録済み（{len(st.session_state.annotations)}件）"
     )
 
 
@@ -914,67 +852,84 @@ with control_col:
 
     else:
 
-        for annotation in (
-            st.session_state.annotations
+        # -------------------------------------------------
+        # 一覧をスクロール可能な枠にする
+        # -------------------------------------------------
+
+        with st.container(
+            height=500,
+            border=True
         ):
 
-            st.write(
-                f"**ID {annotation['id']}**"
-            )
-
-            st.write(
-                f"路線価："
-                f"{annotation['road_value']}"
-            )
-
-            st.write(
-                f"記号："
-                f"{annotation['symbol']}"
-            )
-
-
-            # ---------------------------------------------
-            # 削除
-            # ---------------------------------------------
-
-            if st.button(
-                f"ID {annotation['id']} を削除",
-                key=f"delete_{annotation['id']}",
-                width="stretch"
+            for annotation in (
+                st.session_state.annotations
             ):
 
-                st.session_state.annotations = [
+                st.markdown(
+                    f"**ID {annotation['id']}**"
+                )
 
-                    a
+                st.write(
+                    f"路線価："
+                    f"{annotation['road_value']}"
+                )
 
-                    for a
-                    in st.session_state.annotations
+                st.write(
+                    f"記号："
+                    f"{annotation['symbol']}"
+                )
 
-                    if a["id"]
-                    != annotation["id"]
-                ]
+                st.write(
+                    f"点数："
+                    f"{len(annotation['polyline_px'])}点"
+                )
 
 
                 # -----------------------------------------
-                # IDを振り直す
+                # 削除ボタン
                 # -----------------------------------------
 
-                for i, a in enumerate(
-                    st.session_state.annotations,
-                    start=1
+                if st.button(
+                    f"ID {annotation['id']} を削除",
+                    key=f"delete_{annotation['id']}",
+                    width="stretch"
                 ):
 
-                    a["id"] = i
+                    st.session_state.annotations = [
+
+                        a
+
+                        for a
+                        in st.session_state.annotations
+
+                        if a["id"]
+                        != annotation["id"]
+                    ]
 
 
-                # -----------------------------------------
-                # JSON保存
-                # -----------------------------------------
+                    # -------------------------------------
+                    # IDを1から振り直す
+                    # -------------------------------------
 
-                save_json()
+                    for i, a in enumerate(
+                        st.session_state.annotations,
+                        start=1
+                    ):
+
+                        a["id"] = i
 
 
-                st.rerun()
+                    # -------------------------------------
+                    # JSON保存
+                    # -------------------------------------
+
+                    save_json()
+
+
+                    st.rerun()
+
+
+                st.divider()
 
 
     st.divider()
@@ -1054,8 +1009,9 @@ with control_col:
 
         st.session_state.last_click = None
 
-        st.session_state.ignore_click = None
+        st.session_state.waiting_for_new_click = False
 
         st.session_state.zoom = 1.0
 
         st.rerun()
+
