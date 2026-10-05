@@ -22,6 +22,8 @@ if "json_load_warning" not in st.session_state:
     st.session_state.json_load_warning = None
 if "canvas_revision" not in st.session_state:
     st.session_state.canvas_revision = 0
+if "last_canvas_object_signature" not in st.session_state:
+    st.session_state.last_canvas_object_signature = None
 
 st.title("📍 路線価アノテーションツール")
 
@@ -177,27 +179,49 @@ if uploaded_image is not None:
                 )
 
             if canvas_result.json_data and canvas_result.json_data.get("objects"):
-                last_obj = canvas_result.json_data["objects"][-1]
-                orig_x = int(round(last_obj["left"] / zoom_scale))
-                orig_y = int(round(last_obj["top"] / zoom_scale))
-                point = [orig_x, orig_y]
+                objects = canvas_result.json_data["objects"]
+                last_obj = objects[-1]
+                object_signature = (
+                    len(objects),
+                    last_obj.get("left"),
+                    last_obj.get("top"),
+                )
                 if (
-                    not st.session_state.current_points
-                    or st.session_state.current_points[-1] != point
+                    object_signature
+                    == st.session_state.last_canvas_object_signature
                 ):
-                    st.session_state.current_points.append(point)
-                    st.rerun(scope="fragment")
+                    object_signature = None
+                if object_signature is None:
+                    last_obj = None
+                else:
+                    st.session_state.last_canvas_object_signature = (
+                        object_signature
+                    )
+                if last_obj is None:
+                    pass
+                else:
+                    orig_x = int(round(last_obj["left"] / zoom_scale))
+                    orig_y = int(round(last_obj["top"] / zoom_scale))
+                    point = [orig_x, orig_y]
+                    if (
+                        not st.session_state.current_points
+                        or st.session_state.current_points[-1] != point
+                    ):
+                        st.session_state.current_points.append(point)
+                        st.rerun(scope="fragment")
 
             c_btn1, c_btn2 = st.columns(2)
             with c_btn1:
                 if st.button("↩️ 1つ戻す（最後の点を削除）"):
                     if st.session_state.current_points:
                         st.session_state.current_points.pop()
+                    st.session_state.last_canvas_object_signature = None
                     st.session_state.canvas_revision += 1
                     st.rerun(scope="fragment")
             with c_btn2:
                 if st.button("🗑️ すべてクリア"):
                     st.session_state.current_points = []
+                    st.session_state.last_canvas_object_signature = None
                     st.session_state.canvas_revision += 1
                     st.rerun(scope="fragment")
 
@@ -376,7 +400,8 @@ if uploaded_image is not None:
 
                 # 入力リセット
                 st.session_state.current_points = []
-                st.session_state.canvas_revision += 1
+                # キャンバスを再生成するとスクロール位置が失われるため、
+                # 登録時は同じキャンバスを再利用する。
                 st.rerun()
 
         if st.session_state.editing_id is not None:
@@ -401,7 +426,7 @@ if uploaded_image is not None:
                 for ann in st.session_state.annotations:
                     with st.expander(
                         f"ID: {ann['id']} | 路線価: {ann['land_price']} | 記号: {ann['symbol']}",
-                        expanded=True,
+                        expanded=False,
                     ):
                         col_a, col_b = st.columns([3, 2])
                         with col_a:
