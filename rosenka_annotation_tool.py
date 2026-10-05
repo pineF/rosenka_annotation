@@ -1,5 +1,4 @@
 import json
-import numpy as np
 import streamlit as st
 from PIL import Image, ImageDraw, ImageFont
 from streamlit_drawable_canvas import st_canvas
@@ -19,6 +18,8 @@ if "editing_id" not in st.session_state:
     st.session_state.editing_id = None  # 修正中のアノテーションID
 if "next_id" not in st.session_state:
     st.session_state.next_id = 1  # 新規アノテーションIDカウンタ
+if "json_load_warning" not in st.session_state:
+    st.session_state.json_load_warning = None
 
 st.title("📍 路線価アノテーションツール")
 
@@ -47,6 +48,8 @@ if uploaded_json is not None:
         try:
             data = json.load(uploaded_json)
             loaded_annotations = data.get("annotations", [])
+            if not isinstance(loaded_annotations, list):
+                raise ValueError("annotations は配列である必要があります。")
             st.session_state.annotations = loaded_annotations
 
             # 次のIDの決定
@@ -57,13 +60,14 @@ if uploaded_json is not None:
                 st.session_state.next_id = 1
 
             # 画像サイズのチェック
+            st.session_state.json_load_warning = None
             if uploaded_image is not None:
                 img_temp = Image.open(uploaded_image)
                 w_orig, h_orig = img_temp.size
                 if data.get("image_width") != w_orig or data.get(
                     "image_height"
                 ) != h_orig:
-                    st.sidebar.warning(
+                    st.session_state.json_load_warning = (
                         "⚠️ 警告: JSON内の画像サイズとアップロード中の画像サイズが異なります。"
                     )
 
@@ -82,6 +86,8 @@ if uploaded_image is not None:
     image_original = Image.open(uploaded_image).convert("RGB")
     orig_w, orig_h = image_original.size
     image_name = uploaded_image.name
+    if st.session_state.json_load_warning:
+        st.warning(st.session_state.json_load_warning)
 
     # 表示用サイズ
     disp_w = int(orig_w * zoom_scale)
@@ -136,16 +142,21 @@ if uploaded_image is not None:
                 font=font,
             )
 
-    # 現在修正中・作成中のポリラインを緑色で一時描画
+    # 現在修正中・作成中のポリラインを一時描画
     if st.session_state.current_points:
         curr_pts = [tuple(p) for p in st.session_state.current_points]
+        current_color = (
+            (0, 100, 255)
+            if st.session_state.editing_id is not None
+            else (0, 200, 0)
+        )
         if len(curr_pts) > 1:
-            draw.line(curr_pts, fill=(0, 200, 0), width=4)  # 緑
+            draw.line(curr_pts, fill=current_color, width=4)
         for pt in curr_pts:
             r = 6
             draw.ellipse(
                 [pt[0] - r, pt[1] - r, pt[0] + r, pt[1] + r],
-                fill=(0, 250, 0),
+                fill=current_color,
                 outline=(0, 0, 0),
             )
 
@@ -165,18 +176,19 @@ if uploaded_image is not None:
             "画像上をクリックしてポリラインを作成します。（ズーム時はスクロールして閲覧可能）"
         )
 
-        # 描画キャンバスの配置（スクロール領域内に配置）
-        canvas_result = st_canvas(
-            fill_color="rgba(255, 165, 0, 0.3)",
-            stroke_width=2,
-            stroke_color="#000000",
-            background_image=canvas_bg_resized,
-            update_streamlit=True,
-            height=disp_h,
-            width=disp_w,
-            drawing_mode="point",
-            key=f"canvas_{zoom_percent}_{len(st.session_state.current_points)}_{st.session_state.editing_id}",
-        )
+        # 大きな画像でも表示領域からはみ出した部分を確認できるようにする。
+        with st.container(height=700, border=True):
+            canvas_result = st_canvas(
+                fill_color="rgba(255, 165, 0, 0.3)",
+                stroke_width=2,
+                stroke_color="#000000",
+                background_image=canvas_bg_resized,
+                update_streamlit=True,
+                height=disp_h,
+                width=disp_w,
+                drawing_mode="point",
+                key=f"canvas_{zoom_percent}_{len(st.session_state.current_points)}_{st.session_state.editing_id}",
+            )
 
         # キャンバスクリック時の点の検出と座標変換（表示座標 -> 元画像座標）
         if (
@@ -264,7 +276,12 @@ if uploaded_image is not None:
                 default_r_pattern = mark_info.get("right_pattern", "なし")
 
         # 入力フォーム
-        with st.form("annotation_form"):
+        form_key = (
+            f"annotation_form_edit_{st.session_state.editing_id}"
+            if st.session_state.editing_id is not None
+            else "annotation_form_new"
+        )
+        with st.form(form_key):
             land_price = st.number_input(
                 "路線価（必須・数値）", min_value=0, value=default_price, step=1000
             )
