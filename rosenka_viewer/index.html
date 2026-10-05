@@ -1,11 +1,11 @@
 <!DOCTYPE html>
 <html lang="ja">
-
 <head>
     <meta charset="UTF-8">
 
-    <style>
+    <script src="https://unpkg.com/streamlit-component-lib@2.0.0/dist/index.js"></script>
 
+    <style>
         html, body {
             margin: 0;
             padding: 0;
@@ -15,660 +15,521 @@
             background: #eeeeee;
         }
 
-        #viewer {
+        #viewport {
             position: relative;
-
             width: 100%;
             height: 100%;
-
-            overflow: hidden;
-
-            background:
-                linear-gradient(
-                    45deg,
-                    #eeeeee 25%,
-                    #e5e5e5 25%,
-                    #e5e5e5 50%,
-                    #eeeeee 50%,
-                    #eeeeee 75%,
-                    #e5e5e5 75%
-                );
-
-            background-size: 20px 20px;
-
-            cursor: crosshair;
-
-            user-select: none;
+            overflow: auto;
+            background: #dcdcdc;
         }
 
+        #stage {
+            position: relative;
+            display: block;
+            flex-shrink: 0;
+        }
 
-        #canvas {
+        #map {
             position: absolute;
-
             left: 0;
             top: 0;
-
-            transform-origin: 0 0;
-
+            display: block;
             user-select: none;
+            -webkit-user-drag: none;
         }
 
-
-        #info {
+        #overlay {
             position: absolute;
-
-            top: 10px;
-            left: 10px;
-
-            z-index: 100;
-
-            padding: 6px 10px;
-
-            background: rgba(0, 0, 0, 0.65);
-
-            color: white;
-
-            border-radius: 5px;
-
-            font-size: 13px;
-
-            pointer-events: none;
+            left: 0;
+            top: 0;
+            pointer-events: auto;
         }
 
+        #viewport.dragging {
+            cursor: grabbing;
+        }
+
+        #viewport:not(.dragging) {
+            cursor: crosshair;
+        }
     </style>
-
 </head>
-
 
 <body>
 
-<div id="viewer">
-
-    <canvas id="canvas"></canvas>
-
-    <div id="info">
-        100%
+<div id="viewport">
+    <div id="stage">
+        <svg id="overlay">
+            <image id="mapImage"></image>
+            <g id="annotations"></g>
+            <g id="currentPoints"></g>
+        </svg>
     </div>
-
 </div>
 
-
 <script>
-
-const viewer = document.getElementById("viewer");
-const canvas = document.getElementById("canvas");
-const ctx = canvas.getContext("2d");
-const info = document.getElementById("info");
-
-
-let image = null;
-
-
-// ============================================================
-// 状態
-// ============================================================
+let args = {};
+let imageWidth = 1;
+let imageHeight = 1;
 
 let zoom = 1.0;
+let scrollLeft = 0;
+let scrollTop = 0;
 
-let offsetX = 0;
-let offsetY = 0;
-
-let points = [];
+let currentPoints = [];
+let annotations = [];
 
 let dragging = false;
-
 let dragStartX = 0;
 let dragStartY = 0;
+let dragScrollLeft = 0;
+let dragScrollTop = 0;
 
-let dragOffsetX = 0;
-let dragOffsetY = 0;
+let moved = false;
 
-let suppressClick = false;
+const viewport = document.getElementById("viewport");
+const stage = document.getElementById("stage");
+const overlay = document.getElementById("overlay");
+const mapImage = document.getElementById("mapImage");
+
+const annotationLayer = document.getElementById("annotations");
+const currentPointLayer = document.getElementById("currentPoints");
 
 
-// ============================================================
-// Streamlit Component
-// ============================================================
+/* ---------------------------------------------------------
+   Streamlitからデータを受け取る
+--------------------------------------------------------- */
 
-function sendValue(value) {
+function onRender(event) {
 
-    window.parent.postMessage(
-        {
-            isStreamlitMessage: true,
+    args = event.detail.args || {};
 
-            type: "streamlit:setComponentValue",
+    if (args.image) {
+        imageWidth = Number(args.image_width);
+        imageHeight = Number(args.image_height);
 
-            value: value
-        },
-        "*"
-    );
+        mapImage.setAttribute("href", args.image);
+        mapImage.setAttribute("x", "0");
+        mapImage.setAttribute("y", "0");
+        mapImage.setAttribute("width", imageWidth);
+        mapImage.setAttribute("height", imageHeight);
+    }
 
+    annotations = args.annotations || [];
+    currentPoints = args.current_points || [];
+
+    if (args.zoom !== undefined) {
+        zoom = Number(args.zoom);
+    }
+
+    if (args.scroll_left !== undefined) {
+        scrollLeft = Number(args.scroll_left);
+    }
+
+    if (args.scroll_top !== undefined) {
+        scrollTop = Number(args.scroll_top);
+    }
+
+    updateViewer();
+    drawAnnotations();
+    drawCurrentPoints();
 }
 
 
-// ============================================================
-// サイズ変更
-// ============================================================
+/* ---------------------------------------------------------
+   ビューア更新
+--------------------------------------------------------- */
 
-function resizeCanvas() {
+function updateViewer() {
 
-    if (!image) {
-        return;
-    }
+    const width = imageWidth * zoom;
+    const height = imageHeight * zoom;
 
-    canvas.width = image.naturalWidth;
-    canvas.height = image.naturalHeight;
+    stage.style.width = width + "px";
+    stage.style.height = height + "px";
 
-    draw();
+    overlay.setAttribute("width", width);
+    overlay.setAttribute("height", height);
 
+    overlay.setAttribute(
+        "viewBox",
+        `0 0 ${imageWidth} ${imageHeight}`
+    );
+
+    overlay.style.width = width + "px";
+    overlay.style.height = height + "px";
+
+    /*
+     * SVGの中に画像を表示
+     * viewBoxが元画像座標なので、
+     * 座標は常に元画像のpx座標で扱える
+     */
+    mapImage.setAttribute("width", imageWidth);
+    mapImage.setAttribute("height", imageHeight);
+
+    /*
+     * 現在位置を復元
+     */
+    requestAnimationFrame(() => {
+        viewport.scrollLeft = scrollLeft;
+        viewport.scrollTop = scrollTop;
+    });
 }
 
 
-// ============================================================
-// 描画
-// ============================================================
+/* ---------------------------------------------------------
+   登録済みアノテーションを描画
+--------------------------------------------------------- */
 
-function draw() {
+function drawAnnotations() {
 
-    if (!image) {
-        return;
-    }
+    annotationLayer.innerHTML = "";
 
+    for (const annotation of annotations) {
 
-    ctx.setTransform(
-        1,
-        0,
-        0,
-        1,
-        0,
-        0
-    );
-
-    ctx.clearRect(
-        0,
-        0,
-        canvas.width,
-        canvas.height
-    );
-
-
-    // --------------------------------------------------------
-    // 画像
-    // --------------------------------------------------------
-
-    ctx.drawImage(
-        image,
-        0,
-        0
-    );
-
-
-    // --------------------------------------------------------
-    // 現在のpolyline
-    // --------------------------------------------------------
-
-    if (points.length > 0) {
-
-        ctx.strokeStyle = "red";
-        ctx.lineWidth = 4 / zoom;
-
-        ctx.beginPath();
-
-        ctx.moveTo(
-            points[0][0],
-            points[0][1]
-        );
-
-        for (let i = 1; i < points.length; i++) {
-
-            ctx.lineTo(
-                points[i][0],
-                points[i][1]
-            );
-
-        }
-
-        ctx.stroke();
-
-
-        // ----------------------------------------------------
-        // 点
-        // ----------------------------------------------------
-
-        for (let i = 0; i < points.length; i++) {
-
-            const x = points[i][0];
-            const y = points[i][1];
-
-            ctx.beginPath();
-
-            ctx.arc(
-                x,
-                y,
-                7 / zoom,
-                0,
-                Math.PI * 2
-            );
-
-            ctx.fillStyle = "red";
-
-            ctx.fill();
-
-            ctx.strokeStyle = "white";
-
-            ctx.lineWidth = 2 / zoom;
-
-            ctx.stroke();
-
-
-            // 点番号
-            ctx.fillStyle = "red";
-
-            ctx.font =
-                `${16 / zoom}px Arial`;
-
-            ctx.fillText(
-                String(i + 1),
-                x + 10 / zoom,
-                y - 10 / zoom
-            );
-
-        }
-
-
-        // ----------------------------------------------------
-        // 終点の矢印
-        // ----------------------------------------------------
+        const points = annotation.polyline_px || [];
 
         if (points.length >= 2) {
 
-            const p1 =
-                points[points.length - 2];
-
-            const p2 =
-                points[points.length - 1];
-
-            drawArrowHead(
-                p1[0],
-                p1[1],
-                p2[0],
-                p2[1]
+            const polyline = document.createElementNS(
+                "http://www.w3.org/2000/svg",
+                "polyline"
             );
 
+            polyline.setAttribute(
+                "points",
+                points.map(p => `${p[0]},${p[1]}`).join(" ")
+            );
+
+            polyline.setAttribute("fill", "none");
+            polyline.setAttribute("stroke", "red");
+            polyline.setAttribute("stroke-width", "3");
+            polyline.setAttribute("vector-effect", "non-scaling-stroke");
+
+            annotationLayer.appendChild(polyline);
         }
 
+        /*
+         * ID表示
+         */
+
+        if (points.length > 0) {
+
+            const p = points[0];
+
+            const text = document.createElementNS(
+                "http://www.w3.org/2000/svg",
+                "text"
+            );
+
+            text.setAttribute("x", p[0] + 5);
+            text.setAttribute("y", p[1] - 5);
+
+            text.setAttribute("fill", "red");
+            text.setAttribute("font-size", "18");
+            text.setAttribute("font-weight", "bold");
+
+            text.textContent = annotation.id;
+
+            annotationLayer.appendChild(text);
+        }
     }
-
-
-    // --------------------------------------------------------
-    // Transform
-    // --------------------------------------------------------
-
-    canvas.style.transform =
-        `translate(${offsetX}px, ${offsetY}px) scale(${zoom})`;
-
-
-    info.textContent =
-        `${Math.round(zoom * 100)}%`;
-
-
 }
 
 
-// ============================================================
-// 矢印
-// ============================================================
+/* ---------------------------------------------------------
+   現在入力中の点を描画
+--------------------------------------------------------- */
 
-function drawArrowHead(
-    x1,
-    y1,
-    x2,
-    y2
-) {
+function drawCurrentPoints() {
 
-    const dx = x2 - x1;
-    const dy = y2 - y1;
+    currentPointLayer.innerHTML = "";
 
-    const length =
-        Math.sqrt(
-            dx * dx + dy * dy
+    currentPoints.forEach((p, index) => {
+
+        const circle = document.createElementNS(
+            "http://www.w3.org/2000/svg",
+            "circle"
         );
 
-    if (length === 0) {
+        circle.setAttribute("cx", p[0]);
+        circle.setAttribute("cy", p[1]);
+        circle.setAttribute("r", "5");
+
+        circle.setAttribute("fill", "blue");
+        circle.setAttribute("stroke", "white");
+        circle.setAttribute("stroke-width", "2");
+
+        circle.setAttribute(
+            "vector-effect",
+            "non-scaling-stroke"
+        );
+
+        currentPointLayer.appendChild(circle);
+
+
+        /*
+         * 点番号
+         */
+
+        const text = document.createElementNS(
+            "http://www.w3.org/2000/svg",
+            "text"
+        );
+
+        text.setAttribute("x", p[0] + 7);
+        text.setAttribute("y", p[1] - 7);
+
+        text.setAttribute("fill", "blue");
+        text.setAttribute("font-size", "14");
+        text.setAttribute("font-weight", "bold");
+
+        text.textContent = index + 1;
+
+        currentPointLayer.appendChild(text);
+    });
+
+
+    /*
+     * 現在入力中の線
+     */
+
+    if (currentPoints.length >= 2) {
+
+        const polyline = document.createElementNS(
+            "http://www.w3.org/2000/svg",
+            "polyline"
+        );
+
+        polyline.setAttribute(
+            "points",
+            currentPoints.map(
+                p => `${p[0]},${p[1]}`
+            ).join(" ")
+        );
+
+        polyline.setAttribute("fill", "none");
+        polyline.setAttribute("stroke", "blue");
+        polyline.setAttribute("stroke-width", "3");
+
+        polyline.setAttribute(
+            "vector-effect",
+            "non-scaling-stroke"
+        );
+
+        currentPointLayer.insertBefore(
+            polyline,
+            currentPointLayer.firstChild
+        );
+    }
+}
+
+
+/* ---------------------------------------------------------
+   クリック → 座標取得
+--------------------------------------------------------- */
+
+overlay.addEventListener("click", function(event) {
+
+    /*
+     * ドラッグ終了直後はクリックとして扱わない
+     */
+    if (moved) {
+        moved = false;
         return;
     }
 
-    const ux = dx / length;
-    const uy = dy / length;
-
-    const arrowLength =
-        30 / zoom;
-
-    const arrowWidth =
-        12 / zoom;
-
-    const baseX =
-        x2 - ux * arrowLength;
-
-    const baseY =
-        y2 - uy * arrowLength;
-
-    const px = -uy;
-    const py = ux;
-
-
-    ctx.beginPath();
-
-    ctx.moveTo(
-        x2,
-        y2
-    );
-
-    ctx.lineTo(
-        baseX + px * arrowWidth,
-        baseY + py * arrowWidth
-    );
-
-    ctx.lineTo(
-        baseX - px * arrowWidth,
-        baseY - py * arrowWidth
-    );
-
-    ctx.closePath();
-
-    ctx.fillStyle = "red";
-
-    ctx.fill();
-
-}
-
-
-// ============================================================
-// 画面座標 → 元画像座標
-// ============================================================
-
-function screenToImage(
-    screenX,
-    screenY
-) {
-
-    const rect =
-        viewer.getBoundingClientRect();
-
+    const rect = overlay.getBoundingClientRect();
 
     const x =
-        (screenX - rect.left - offsetX)
+        (event.clientX - rect.left)
         / zoom;
 
     const y =
-        (screenY - rect.top - offsetY)
+        (event.clientY - rect.top)
         / zoom;
 
+    const px = Math.round(x);
+    const py = Math.round(y);
 
-    return {
-        x: x,
-        y: y
-    };
+    currentPoints.push([px, py]);
 
-}
+    drawCurrentPoints();
 
-
-// ============================================================
-// 画像クリック
-// ============================================================
-
-viewer.addEventListener(
-    "click",
-    function(event) {
-
-        if (suppressClick) {
-
-            suppressClick = false;
-
-            return;
-
-        }
+    sendEvent({
+        type: "point",
+        x: px,
+        y: py,
+        current_points: currentPoints,
+        zoom: zoom,
+        scroll_left: viewport.scrollLeft,
+        scroll_top: viewport.scrollTop
+    });
+});
 
 
-        // Ctrlクリック等は無視
-        if (
-            event.ctrlKey ||
-            event.shiftKey ||
-            event.altKey
-        ) {
-            return;
-        }
+/* ---------------------------------------------------------
+   左ドラッグ → 移動
+--------------------------------------------------------- */
 
+overlay.addEventListener("mousedown", function(event) {
 
-        const point =
-            screenToImage(
-                event.clientX,
-                event.clientY
-            );
-
-
-        // 画像範囲外なら無視
-        if (
-            point.x < 0 ||
-            point.y < 0 ||
-            point.x >= image.naturalWidth ||
-            point.y >= image.naturalHeight
-        ) {
-            return;
-        }
-
-
-        points.push([
-            Math.round(point.x),
-            Math.round(point.y)
-        ]);
-
-
-        draw();
-
-
-        sendValue({
-            type: "point",
-
-            x: Math.round(point.x),
-
-            y: Math.round(point.y),
-
-            points: points
-        });
-
+    if (event.button !== 0) {
+        return;
     }
-);
+
+    dragging = true;
+    moved = false;
+
+    dragStartX = event.clientX;
+    dragStartY = event.clientY;
+
+    dragScrollLeft = viewport.scrollLeft;
+    dragScrollTop = viewport.scrollTop;
+
+    viewport.classList.add("dragging");
+
+    event.preventDefault();
+});
 
 
-// ============================================================
-// ドラッグ
-// ============================================================
+window.addEventListener("mousemove", function(event) {
 
-viewer.addEventListener(
-    "mousedown",
-    function(event) {
-
-        // Ctrlを押している場合は
-        // ズーム操作用なのでドラッグしない
-        if (event.ctrlKey) {
-            return;
-        }
-
-
-        dragging = true;
-
-        dragStartX = event.clientX;
-        dragStartY = event.clientY;
-
-        dragOffsetX = offsetX;
-        dragOffsetY = offsetY;
-
+    if (!dragging) {
+        return;
     }
-);
 
+    const dx = event.clientX - dragStartX;
+    const dy = event.clientY - dragStartY;
 
-window.addEventListener(
-    "mousemove",
-    function(event) {
-
-        if (!dragging) {
-            return;
-        }
-
-
-        const dx =
-            event.clientX - dragStartX;
-
-        const dy =
-            event.clientY - dragStartY;
-
-
-        // 少しでも移動したら
-        // クリックではなくドラッグ
-        if (
-            Math.abs(dx) > 3 ||
-            Math.abs(dy) > 3
-        ) {
-
-            suppressClick = true;
-
-        }
-
-
-        offsetX =
-            dragOffsetX + dx;
-
-        offsetY =
-            dragOffsetY + dy;
-
-
-        draw();
-
+    if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
+        moved = true;
     }
-);
+
+    viewport.scrollLeft =
+        dragScrollLeft - dx;
+
+    viewport.scrollTop =
+        dragScrollTop - dy;
+});
 
 
-window.addEventListener(
-    "mouseup",
-    function() {
+window.addEventListener("mouseup", function() {
 
-        dragging = false;
-
+    if (!dragging) {
+        return;
     }
-);
+
+    dragging = false;
+
+    viewport.classList.remove("dragging");
+
+    scrollLeft = viewport.scrollLeft;
+    scrollTop = viewport.scrollTop;
+});
 
 
-// ============================================================
-// Ctrl + ホイール
-// ============================================================
+/* ---------------------------------------------------------
+   Ctrl + ホイール → ズーム
+--------------------------------------------------------- */
 
-viewer.addEventListener(
+viewport.addEventListener(
     "wheel",
     function(event) {
 
-        event.preventDefault();
-
-
-        // ----------------------------------------------------
-        // Ctrl + ホイール
-        // → ズーム
-        // ----------------------------------------------------
-
-        if (event.ctrlKey) {
-
-            const oldZoom = zoom;
-
-
-            const mouseX =
-                event.clientX -
-                viewer.getBoundingClientRect().left;
-
-            const mouseY =
-                event.clientY -
-                viewer.getBoundingClientRect().top;
-
-
-            // マウス位置にある元画像座標
-            const imageX =
-                (mouseX - offsetX)
-                / oldZoom;
-
-            const imageY =
-                (mouseY - offsetY)
-                / oldZoom;
-
-
-            // ズーム倍率
-            if (event.deltaY < 0) {
-
-                zoom *= 1.1;
-
-            } else {
-
-                zoom /= 1.1;
-
-            }
-
-
-            // 制限
-            zoom =
-                Math.max(
-                    0.25,
-                    Math.min(
-                        zoom,
-                        10.0
-                    )
-                );
-
-
-            // マウス位置を維持
-            offsetX =
-                mouseX - imageX * zoom;
-
-            offsetY =
-                mouseY - imageY * zoom;
-
-
-            draw();
-
-
-            sendValue({
-                type: "zoom",
-
-                zoom: zoom
-            });
-
-
+        if (!event.ctrlKey) {
+            /*
+             * 通常ホイールはブラウザの
+             * スクロールに任せる
+             */
             return;
-
         }
 
+        event.preventDefault();
 
-        // ----------------------------------------------------
-        // 通常ホイール
-        // → スクロール
-        // ----------------------------------------------------
+        const rect =
+            viewport.getBoundingClientRect();
 
-        offsetX -= event.deltaX;
+        /*
+         * マウス位置の「元画像座標」
+         */
+        const mouseX =
+            (
+                viewport.scrollLeft
+                + event.clientX
+                - rect.left
+            ) / zoom;
 
-        offsetY -= event.deltaY;
+        const mouseY =
+            (
+                viewport.scrollTop
+                + event.clientY
+                - rect.top
+            ) / zoom;
 
 
-        draw();
+        /*
+         * ズーム倍率
+         */
 
+        const factor =
+            event.deltaY < 0
+                ? 1.15
+                : 1 / 1.15;
+
+        const oldZoom = zoom;
+
+        zoom *= factor;
+
+        /*
+         * ズーム範囲
+         */
+
+        zoom = Math.max(
+            0.25,
+            Math.min(8.0, zoom)
+        );
+
+
+        /*
+         * マウス位置を中心にズーム
+         */
+
+        const newScrollLeft =
+            mouseX * zoom
+            - (event.clientX - rect.left);
+
+        const newScrollTop =
+            mouseY * zoom
+            - (event.clientY - rect.top);
+
+
+        updateViewer();
+
+        requestAnimationFrame(() => {
+
+            viewport.scrollLeft =
+                Math.max(0, newScrollLeft);
+
+            viewport.scrollTop =
+                Math.max(0, newScrollTop);
+
+            scrollLeft =
+                viewport.scrollLeft;
+
+            scrollTop =
+                viewport.scrollTop;
+        });
     },
-    {
-        passive: false
-    }
+    { passive: false }
 );
 
 
-// ============================================================
-// ダブルクリック
-// ============================================================
+/* ---------------------------------------------------------
+   ダブルクリック → 100%
+--------------------------------------------------------- */
 
-viewer.addEventListener(
+overlay.addEventListener(
     "dblclick",
     function(event) {
 
@@ -676,125 +537,52 @@ viewer.addEventListener(
 
         zoom = 1.0;
 
-        offsetX = 0;
+        updateViewer();
 
-        offsetY = 0;
+        requestAnimationFrame(() => {
 
-        draw();
+            viewport.scrollLeft = 0;
+            viewport.scrollTop = 0;
 
+            scrollLeft = 0;
+            scrollTop = 0;
+        });
     }
 );
 
 
-// ============================================================
-// Streamlitからのメッセージ
-// ============================================================
+/* ---------------------------------------------------------
+   Streamlitへイベント送信
+--------------------------------------------------------- */
 
-window.addEventListener(
-    "message",
-    function(event) {
+function sendEvent(data) {
 
-        const data = event.data;
-
-
-        if (!data) {
-            return;
-        }
-
-
-        if (
-            data.type ===
-            "streamlit:render"
-        ) {
-
-            const args =
-                data.args;
-
-
-            if (
-                args &&
-                args.image
-            ) {
-
-                image = new Image();
-
-                image.onload =
-                    function() {
-
-                        resizeCanvas();
-
-                    };
-
-
-                image.src =
-                    "data:image/png;base64," +
-                    args.image;
-
-            }
-
-
-            if (
-                args &&
-                args.reset_points
-            ) {
-
-                points = [];
-
-                draw();
-
-            }
-
-
-            if (
-                args &&
-                args.zoom !== undefined
-            ) {
-
-                zoom =
-                    args.zoom;
-
-                draw();
-
-            }
-
-
-            // Streamlitへ準備完了を通知
-            window.parent.postMessage(
-                {
-                    isStreamlitMessage: true,
-
-                    type:
-                        "streamlit:componentReady",
-
-                    apiVersion: 1
-                },
-                "*"
-            );
-
-        }
-
+    if (
+        typeof Streamlit !== "undefined" &&
+        Streamlit.setComponentValue
+    ) {
+        Streamlit.setComponentValue(data);
     }
-);
+}
 
 
-// ============================================================
-// 初期化
-// ============================================================
+/* ---------------------------------------------------------
+   Streamlitコンポーネント初期化
+--------------------------------------------------------- */
 
-window.parent.postMessage(
-    {
-        isStreamlitMessage: true,
+if (typeof Streamlit !== "undefined") {
 
-        type:
-            "streamlit:componentReady",
+    Streamlit.events.addEventListener(
+        Streamlit.RENDER_EVENT,
+        onRender
+    );
 
-        apiVersion: 1
-    },
-    "*"
-);
+    Streamlit.setComponentReady();
+
+    Streamlit.setFrameHeight(600);
+}
 
 </script>
 
 </body>
-
 </html>
