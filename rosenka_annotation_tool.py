@@ -1,4 +1,3 @@
-```python
 import streamlit as st
 from PIL import Image
 import json
@@ -672,4 +671,4 @@ else:
     st.info(
         "アノテーションを登録するとJSONが表示されます。"
     )
-```
+
