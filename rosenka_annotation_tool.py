@@ -1,7 +1,16 @@
 import json
 import streamlit as st
 from PIL import Image, ImageDraw, ImageFont
+from streamlit.errors import StreamlitInvalidLayoutContextError
 from streamlit_drawable_canvas import st_canvas
+
+
+def rerun_canvas() -> None:
+    """Use a fast fragment rerun, with a safe fallback after a full rerun."""
+    try:
+        st.rerun(scope="fragment")
+    except StreamlitInvalidLayoutContextError:
+        st.rerun()
 
 # ------------------------------------------------------------------------------
 # 1. ページ初期設定 & セッション状態の初期化
@@ -210,7 +219,7 @@ if uploaded_image is not None:
                         or st.session_state.current_points[-1] != point
                     ):
                         st.session_state.current_points.append(point)
-                        st.rerun(scope="fragment")
+                        rerun_canvas()
 
             c_btn1, c_btn2 = st.columns(2)
             with c_btn1:
@@ -222,7 +231,7 @@ if uploaded_image is not None:
                         "objects": canvas_objects[:-1],
                     }
                     st.session_state.last_canvas_object_signature = None
-                    st.rerun(scope="fragment")
+                    rerun_canvas()
             with c_btn2:
                 if st.button("🗑️ すべてクリア"):
                     st.session_state.current_points = []
@@ -231,7 +240,7 @@ if uploaded_image is not None:
                         "objects": [],
                     }
                     st.session_state.last_canvas_object_signature = None
-                    st.rerun(scope="fragment")
+                    rerun_canvas()
 
             st.write(
                 f"**現在のポリライン点数**: {len(st.session_state.current_points)} 点"
