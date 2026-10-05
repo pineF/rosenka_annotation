@@ -147,7 +147,7 @@ if uploaded_image is not None:
                     draw.text(
                         (pts[0][0] + 8, pts[0][1] - 8),
                         f"ID:{ann_id}",
-                        fill=(0, 0, 0),
+                        fill=(255, 0, 0),
                         font=font,
                     )
 
