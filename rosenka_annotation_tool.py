@@ -132,12 +132,12 @@ if uploaded_image is not None:
                     and ann_id == st.session_state.editing_id
                     else (255, 0, 0)
                 )
-                width = 5 if line_color == (0, 100, 255) else 4
+                width = 4
 
                 if len(pts) > 1:
                     draw.line(pts, fill=line_color, width=width)
                 for pt in pts:
-                    r = 5
+                    r = 4
                     draw.ellipse(
                         [pt[0] - r, pt[1] - r, pt[0] + r, pt[1] + r],
                         fill=line_color,
@@ -161,7 +161,7 @@ if uploaded_image is not None:
                 if len(curr_pts) > 1:
                     draw.line(curr_pts, fill=current_color, width=4)
                 for pt in curr_pts:
-                    r = 6
+                    r = 4
                     draw.ellipse(
                         [pt[0] - r, pt[1] - r, pt[0] + r, pt[1] + r],
                         fill=current_color,
