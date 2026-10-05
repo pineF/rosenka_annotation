@@ -96,78 +96,6 @@ if uploaded_image is not None:
     disp_h = int(orig_h * zoom_scale)
 
     # --------------------------------------------------------------------------
-    # 3. Canvas背景画像の生成（既存アノテーションの「線描画」含む）
-    # --------------------------------------------------------------------------
-    # 元画像コピーに既存線を描画（元画像座標で高解像度描画）
-    canvas_bg_orig = image_original.copy()
-    draw = ImageDraw.Draw(canvas_bg_orig)
-
-    # フォント設定（簡易的なフォント）
-    try:
-        font = ImageFont.load_default()
-    except Exception:
-        font = None
-
-    for ann in st.session_state.annotations:
-        ann_id = ann["id"]
-        pts = [tuple(p) for p in ann["polyline"]]
-
-        # 修正対象は「青線」、その他登録済みは「赤線」
-        if (
-            st.session_state.editing_id is not None
-            and ann_id == st.session_state.editing_id
-        ):
-            line_color = (0, 100, 255)  # 青
-            width = 5
-        else:
-            line_color = (255, 0, 0)  # 赤
-            width = 4
-
-        # ポリラインと頂点の描画
-        if len(pts) > 1:
-            draw.line(pts, fill=line_color, width=width)
-        for pt in pts:
-            r = 5
-            draw.ellipse(
-                [pt[0] - r, pt[1] - r, pt[0] + r, pt[1] + r],
-                fill=line_color,
-                outline=(255, 255, 255),
-            )
-
-        # IDのテキスト表示
-        if pts:
-            start_p = pts[0]
-            draw.text(
-                (start_p[0] + 8, start_p[1] - 8),
-                f"ID:{ann_id}",
-                fill=(0, 0, 0),
-                font=font,
-            )
-
-    # 現在修正中・作成中のポリラインを一時描画
-    if st.session_state.current_points:
-        curr_pts = [tuple(p) for p in st.session_state.current_points]
-        current_color = (
-            (0, 100, 255)
-            if st.session_state.editing_id is not None
-            else (0, 200, 0)
-        )
-        if len(curr_pts) > 1:
-            draw.line(curr_pts, fill=current_color, width=4)
-        for pt in curr_pts:
-            r = 6
-            draw.ellipse(
-                [pt[0] - r, pt[1] - r, pt[0] + r, pt[1] + r],
-                fill=current_color,
-                outline=(0, 0, 0),
-            )
-
-    # 表示用に縮小・拡大リサイズ
-    canvas_bg_resized = canvas_bg_orig.resize(
-        (disp_w, disp_h), Image.Resampling.LANCZOS
-    )
-
-    # --------------------------------------------------------------------------
     # 4. メインレイアウト（左：画像・描画領域 / 右：属性入力 & データ管理）
     # --------------------------------------------------------------------------
     col_canvas, col_form = st.columns([7, 5])
@@ -178,68 +106,108 @@ if uploaded_image is not None:
             "画像上をクリックしてポリラインを作成します。（ズーム時はスクロールして閲覧可能）"
         )
 
-        # 大きな画像でも表示領域からはみ出した部分を確認できるようにする。
-        with st.container(height=700, border=True):
-            canvas_result = st_canvas(
-                fill_color="rgba(255, 165, 0, 0.3)",
-                stroke_width=2,
-                stroke_color="#000000",
-                background_image=canvas_bg_resized,
-                update_streamlit=True,
-                height=disp_h,
-                width=disp_w,
-                drawing_mode="point",
-                # クリックのたびにkeyを変えるとキャンバスが再生成され、
-                # ズーム時のスクロール位置が先頭に戻るため、表示条件だけで固定する。
-                key=(
-                    f"canvas_{zoom_percent}_{st.session_state.editing_id}_"
-                    f"{st.session_state.canvas_revision}"
-                ),
+        @st.fragment
+        def render_canvas():
+            canvas_bg_orig = image_original.copy()
+            draw = ImageDraw.Draw(canvas_bg_orig)
+            font = ImageFont.load_default()
+
+            for ann in st.session_state.annotations:
+                ann_id = ann["id"]
+                pts = [tuple(p) for p in ann["polyline"]]
+                line_color = (
+                    (0, 100, 255)
+                    if st.session_state.editing_id is not None
+                    and ann_id == st.session_state.editing_id
+                    else (255, 0, 0)
+                )
+                width = 5 if line_color == (0, 100, 255) else 4
+
+                if len(pts) > 1:
+                    draw.line(pts, fill=line_color, width=width)
+                for pt in pts:
+                    r = 5
+                    draw.ellipse(
+                        [pt[0] - r, pt[1] - r, pt[0] + r, pt[1] + r],
+                        fill=line_color,
+                        outline=(255, 255, 255),
+                    )
+                if pts:
+                    draw.text(
+                        (pts[0][0] + 8, pts[0][1] - 8),
+                        f"ID:{ann_id}",
+                        fill=(0, 0, 0),
+                        font=font,
+                    )
+
+            if st.session_state.current_points:
+                curr_pts = [tuple(p) for p in st.session_state.current_points]
+                current_color = (
+                    (0, 100, 255)
+                    if st.session_state.editing_id is not None
+                    else (0, 200, 0)
+                )
+                if len(curr_pts) > 1:
+                    draw.line(curr_pts, fill=current_color, width=4)
+                for pt in curr_pts:
+                    r = 6
+                    draw.ellipse(
+                        [pt[0] - r, pt[1] - r, pt[0] + r, pt[1] + r],
+                        fill=current_color,
+                        outline=(0, 0, 0),
+                    )
+
+            canvas_bg_resized = canvas_bg_orig.resize(
+                (disp_w, disp_h), Image.Resampling.LANCZOS
             )
+            with st.container(height=700, border=True):
+                canvas_result = st_canvas(
+                    fill_color="rgba(255, 165, 0, 0.3)",
+                    stroke_width=2,
+                    stroke_color="#000000",
+                    background_image=canvas_bg_resized,
+                    update_streamlit=True,
+                    height=disp_h,
+                    width=disp_w,
+                    drawing_mode="point",
+                    key=(
+                        f"canvas_{zoom_percent}_{st.session_state.editing_id}_"
+                        f"{st.session_state.canvas_revision}"
+                    ),
+                )
 
-        # キャンバスクリック時の点の検出と座標変換（表示座標 -> 元画像座標）
-        if (
-            canvas_result.json_data is not None
-            and "objects" in canvas_result.json_data
-        ):
-            objects = canvas_result.json_data["objects"]
-            if len(objects) > 0:
-                last_obj = objects[-1]
-                click_x_disp = last_obj["left"]
-                click_y_disp = last_obj["top"]
-
-                # 元画像座標に逆算変換
-                orig_x = int(round(click_x_disp / zoom_scale))
-                orig_y = int(round(click_y_disp / zoom_scale))
-
-                # 重複登録を防ぐ処理（最後の点と極端に同じでなければ追加）
+            if canvas_result.json_data and canvas_result.json_data.get("objects"):
+                last_obj = canvas_result.json_data["objects"][-1]
+                orig_x = int(round(last_obj["left"] / zoom_scale))
+                orig_y = int(round(last_obj["top"] / zoom_scale))
+                point = [orig_x, orig_y]
                 if (
                     not st.session_state.current_points
-                    or st.session_state.current_points[-1] != [orig_x, orig_y]
+                    or st.session_state.current_points[-1] != point
                 ):
-                    st.session_state.current_points.append([orig_x, orig_y])
-                    st.rerun()
+                    st.session_state.current_points.append(point)
+                    st.rerun(scope="fragment")
 
-        # ポリライン作成操作用ボタン
-        c_btn1, c_btn2 = st.columns(2)
-        with c_btn1:
-            if st.button("↩️ 1つ戻す（最後の点を削除）"):
-                if st.session_state.current_points:
-                    st.session_state.current_points.pop()
+            c_btn1, c_btn2 = st.columns(2)
+            with c_btn1:
+                if st.button("↩️ 1つ戻す（最後の点を削除）"):
+                    if st.session_state.current_points:
+                        st.session_state.current_points.pop()
                     st.session_state.canvas_revision += 1
-                    st.rerun()
-        with c_btn2:
-            if st.button("🗑️ すべてクリア"):
-                st.session_state.current_points = []
-                st.session_state.canvas_revision += 1
-                st.rerun()
+                    st.rerun(scope="fragment")
+            with c_btn2:
+                if st.button("🗑️ すべてクリア"):
+                    st.session_state.current_points = []
+                    st.session_state.canvas_revision += 1
+                    st.rerun(scope="fragment")
 
-        # クリックポイント一覧表示
-        st.write(
-            f"**現在のポリライン点数**: {len(st.session_state.current_points)} 点"
-        )
-        if st.session_state.current_points:
-            st.json(st.session_state.current_points)
+            st.write(
+                f"**現在のポリライン点数**: {len(st.session_state.current_points)} 点"
+            )
+            if st.session_state.current_points:
+                st.json(st.session_state.current_points)
+
+        render_canvas()
 
     with col_form:
         st.subheader(
