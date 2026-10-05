@@ -187,7 +187,9 @@ if uploaded_image is not None:
                 height=disp_h,
                 width=disp_w,
                 drawing_mode="point",
-                key=f"canvas_{zoom_percent}_{len(st.session_state.current_points)}_{st.session_state.editing_id}",
+                # クリックのたびにkeyを変えるとキャンバスが再生成され、
+                # ズーム時のスクロール位置が先頭に戻るため、表示条件だけで固定する。
+                key=f"canvas_{zoom_percent}_{st.session_state.editing_id}",
             )
 
         # キャンバスクリック時の点の検出と座標変換（表示座標 -> 元画像座標）
