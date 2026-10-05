@@ -1,0 +1,800 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <meta charset="UTF-8">
+
+    <style>
+
+        html, body {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background: #eeeeee;
+        }
+
+        #viewer {
+            position: relative;
+
+            width: 100%;
+            height: 100%;
+
+            overflow: hidden;
+
+            background:
+                linear-gradient(
+                    45deg,
+                    #eeeeee 25%,
+                    #e5e5e5 25%,
+                    #e5e5e5 50%,
+                    #eeeeee 50%,
+                    #eeeeee 75%,
+                    #e5e5e5 75%
+                );
+
+            background-size: 20px 20px;
+
+            cursor: crosshair;
+
+            user-select: none;
+        }
+
+
+        #canvas {
+            position: absolute;
+
+            left: 0;
+            top: 0;
+
+            transform-origin: 0 0;
+
+            user-select: none;
+        }
+
+
+        #info {
+            position: absolute;
+
+            top: 10px;
+            left: 10px;
+
+            z-index: 100;
+
+            padding: 6px 10px;
+
+            background: rgba(0, 0, 0, 0.65);
+
+            color: white;
+
+            border-radius: 5px;
+
+            font-size: 13px;
+
+            pointer-events: none;
+        }
+
+    </style>
+
+</head>
+
+
+<body>
+
+<div id="viewer">
+
+    <canvas id="canvas"></canvas>
+
+    <div id="info">
+        100%
+    </div>
+
+</div>
+
+
+<script>
+
+const viewer = document.getElementById("viewer");
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+const info = document.getElementById("info");
+
+
+let image = null;
+
+
+// ============================================================
+// 状態
+// ============================================================
+
+let zoom = 1.0;
+
+let offsetX = 0;
+let offsetY = 0;
+
+let points = [];
+
+let dragging = false;
+
+let dragStartX = 0;
+let dragStartY = 0;
+
+let dragOffsetX = 0;
+let dragOffsetY = 0;
+
+let suppressClick = false;
+
+
+// ============================================================
+// Streamlit Component
+// ============================================================
+
+function sendValue(value) {
+
+    window.parent.postMessage(
+        {
+            isStreamlitMessage: true,
+
+            type: "streamlit:setComponentValue",
+
+            value: value
+        },
+        "*"
+    );
+
+}
+
+
+// ============================================================
+// サイズ変更
+// ============================================================
+
+function resizeCanvas() {
+
+    if (!image) {
+        return;
+    }
+
+    canvas.width = image.naturalWidth;
+    canvas.height = image.naturalHeight;
+
+    draw();
+
+}
+
+
+// ============================================================
+// 描画
+// ============================================================
+
+function draw() {
+
+    if (!image) {
+        return;
+    }
+
+
+    ctx.setTransform(
+        1,
+        0,
+        0,
+        1,
+        0,
+        0
+    );
+
+    ctx.clearRect(
+        0,
+        0,
+        canvas.width,
+        canvas.height
+    );
+
+
+    // --------------------------------------------------------
+    // 画像
+    // --------------------------------------------------------
+
+    ctx.drawImage(
+        image,
+        0,
+        0
+    );
+
+
+    // --------------------------------------------------------
+    // 現在のpolyline
+    // --------------------------------------------------------
+
+    if (points.length > 0) {
+
+        ctx.strokeStyle = "red";
+        ctx.lineWidth = 4 / zoom;
+
+        ctx.beginPath();
+
+        ctx.moveTo(
+            points[0][0],
+            points[0][1]
+        );
+
+        for (let i = 1; i < points.length; i++) {
+
+            ctx.lineTo(
+                points[i][0],
+                points[i][1]
+            );
+
+        }
+
+        ctx.stroke();
+
+
+        // ----------------------------------------------------
+        // 点
+        // ----------------------------------------------------
+
+        for (let i = 0; i < points.length; i++) {
+
+            const x = points[i][0];
+            const y = points[i][1];
+
+            ctx.beginPath();
+
+            ctx.arc(
+                x,
+                y,
+                7 / zoom,
+                0,
+                Math.PI * 2
+            );
+
+            ctx.fillStyle = "red";
+
+            ctx.fill();
+
+            ctx.strokeStyle = "white";
+
+            ctx.lineWidth = 2 / zoom;
+
+            ctx.stroke();
+
+
+            // 点番号
+            ctx.fillStyle = "red";
+
+            ctx.font =
+                `${16 / zoom}px Arial`;
+
+            ctx.fillText(
+                String(i + 1),
+                x + 10 / zoom,
+                y - 10 / zoom
+            );
+
+        }
+
+
+        // ----------------------------------------------------
+        // 終点の矢印
+        // ----------------------------------------------------
+
+        if (points.length >= 2) {
+
+            const p1 =
+                points[points.length - 2];
+
+            const p2 =
+                points[points.length - 1];
+
+            drawArrowHead(
+                p1[0],
+                p1[1],
+                p2[0],
+                p2[1]
+            );
+
+        }
+
+    }
+
+
+    // --------------------------------------------------------
+    // Transform
+    // --------------------------------------------------------
+
+    canvas.style.transform =
+        `translate(${offsetX}px, ${offsetY}px) scale(${zoom})`;
+
+
+    info.textContent =
+        `${Math.round(zoom * 100)}%`;
+
+
+}
+
+
+// ============================================================
+// 矢印
+// ============================================================
+
+function drawArrowHead(
+    x1,
+    y1,
+    x2,
+    y2
+) {
+
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+
+    const length =
+        Math.sqrt(
+            dx * dx + dy * dy
+        );
+
+    if (length === 0) {
+        return;
+    }
+
+    const ux = dx / length;
+    const uy = dy / length;
+
+    const arrowLength =
+        30 / zoom;
+
+    const arrowWidth =
+        12 / zoom;
+
+    const baseX =
+        x2 - ux * arrowLength;
+
+    const baseY =
+        y2 - uy * arrowLength;
+
+    const px = -uy;
+    const py = ux;
+
+
+    ctx.beginPath();
+
+    ctx.moveTo(
+        x2,
+        y2
+    );
+
+    ctx.lineTo(
+        baseX + px * arrowWidth,
+        baseY + py * arrowWidth
+    );
+
+    ctx.lineTo(
+        baseX - px * arrowWidth,
+        baseY - py * arrowWidth
+    );
+
+    ctx.closePath();
+
+    ctx.fillStyle = "red";
+
+    ctx.fill();
+
+}
+
+
+// ============================================================
+// 画面座標 → 元画像座標
+// ============================================================
+
+function screenToImage(
+    screenX,
+    screenY
+) {
+
+    const rect =
+        viewer.getBoundingClientRect();
+
+
+    const x =
+        (screenX - rect.left - offsetX)
+        / zoom;
+
+    const y =
+        (screenY - rect.top - offsetY)
+        / zoom;
+
+
+    return {
+        x: x,
+        y: y
+    };
+
+}
+
+
+// ============================================================
+// 画像クリック
+// ============================================================
+
+viewer.addEventListener(
+    "click",
+    function(event) {
+
+        if (suppressClick) {
+
+            suppressClick = false;
+
+            return;
+
+        }
+
+
+        // Ctrlクリック等は無視
+        if (
+            event.ctrlKey ||
+            event.shiftKey ||
+            event.altKey
+        ) {
+            return;
+        }
+
+
+        const point =
+            screenToImage(
+                event.clientX,
+                event.clientY
+            );
+
+
+        // 画像範囲外なら無視
+        if (
+            point.x < 0 ||
+            point.y < 0 ||
+            point.x >= image.naturalWidth ||
+            point.y >= image.naturalHeight
+        ) {
+            return;
+        }
+
+
+        points.push([
+            Math.round(point.x),
+            Math.round(point.y)
+        ]);
+
+
+        draw();
+
+
+        sendValue({
+            type: "point",
+
+            x: Math.round(point.x),
+
+            y: Math.round(point.y),
+
+            points: points
+        });
+
+    }
+);
+
+
+// ============================================================
+// ドラッグ
+// ============================================================
+
+viewer.addEventListener(
+    "mousedown",
+    function(event) {
+
+        // Ctrlを押している場合は
+        // ズーム操作用なのでドラッグしない
+        if (event.ctrlKey) {
+            return;
+        }
+
+
+        dragging = true;
+
+        dragStartX = event.clientX;
+        dragStartY = event.clientY;
+
+        dragOffsetX = offsetX;
+        dragOffsetY = offsetY;
+
+    }
+);
+
+
+window.addEventListener(
+    "mousemove",
+    function(event) {
+
+        if (!dragging) {
+            return;
+        }
+
+
+        const dx =
+            event.clientX - dragStartX;
+
+        const dy =
+            event.clientY - dragStartY;
+
+
+        // 少しでも移動したら
+        // クリックではなくドラッグ
+        if (
+            Math.abs(dx) > 3 ||
+            Math.abs(dy) > 3
+        ) {
+
+            suppressClick = true;
+
+        }
+
+
+        offsetX =
+            dragOffsetX + dx;
+
+        offsetY =
+            dragOffsetY + dy;
+
+
+        draw();
+
+    }
+);
+
+
+window.addEventListener(
+    "mouseup",
+    function() {
+
+        dragging = false;
+
+    }
+);
+
+
+// ============================================================
+// Ctrl + ホイール
+// ============================================================
+
+viewer.addEventListener(
+    "wheel",
+    function(event) {
+
+        event.preventDefault();
+
+
+        // ----------------------------------------------------
+        // Ctrl + ホイール
+        // → ズーム
+        // ----------------------------------------------------
+
+        if (event.ctrlKey) {
+
+            const oldZoom = zoom;
+
+
+            const mouseX =
+                event.clientX -
+                viewer.getBoundingClientRect().left;
+
+            const mouseY =
+                event.clientY -
+                viewer.getBoundingClientRect().top;
+
+
+            // マウス位置にある元画像座標
+            const imageX =
+                (mouseX - offsetX)
+                / oldZoom;
+
+            const imageY =
+                (mouseY - offsetY)
+                / oldZoom;
+
+
+            // ズーム倍率
+            if (event.deltaY < 0) {
+
+                zoom *= 1.1;
+
+            } else {
+
+                zoom /= 1.1;
+
+            }
+
+
+            // 制限
+            zoom =
+                Math.max(
+                    0.25,
+                    Math.min(
+                        zoom,
+                        10.0
+                    )
+                );
+
+
+            // マウス位置を維持
+            offsetX =
+                mouseX - imageX * zoom;
+
+            offsetY =
+                mouseY - imageY * zoom;
+
+
+            draw();
+
+
+            sendValue({
+                type: "zoom",
+
+                zoom: zoom
+            });
+
+
+            return;
+
+        }
+
+
+        // ----------------------------------------------------
+        // 通常ホイール
+        // → スクロール
+        // ----------------------------------------------------
+
+        offsetX -= event.deltaX;
+
+        offsetY -= event.deltaY;
+
+
+        draw();
+
+    },
+    {
+        passive: false
+    }
+);
+
+
+// ============================================================
+// ダブルクリック
+// ============================================================
+
+viewer.addEventListener(
+    "dblclick",
+    function(event) {
+
+        event.preventDefault();
+
+        zoom = 1.0;
+
+        offsetX = 0;
+
+        offsetY = 0;
+
+        draw();
+
+    }
+);
+
+
+// ============================================================
+// Streamlitからのメッセージ
+// ============================================================
+
+window.addEventListener(
+    "message",
+    function(event) {
+
+        const data = event.data;
+
+
+        if (!data) {
+            return;
+        }
+
+
+        if (
+            data.type ===
+            "streamlit:render"
+        ) {
+
+            const args =
+                data.args;
+
+
+            if (
+                args &&
+                args.image
+            ) {
+
+                image = new Image();
+
+                image.onload =
+                    function() {
+
+                        resizeCanvas();
+
+                    };
+
+
+                image.src =
+                    "data:image/png;base64," +
+                    args.image;
+
+            }
+
+
+            if (
+                args &&
+                args.reset_points
+            ) {
+
+                points = [];
+
+                draw();
+
+            }
+
+
+            if (
+                args &&
+                args.zoom !== undefined
+            ) {
+
+                zoom =
+                    args.zoom;
+
+                draw();
+
+            }
+
+
+            // Streamlitへ準備完了を通知
+            window.parent.postMessage(
+                {
+                    isStreamlitMessage: true,
+
+                    type:
+                        "streamlit:componentReady",
+
+                    apiVersion: 1
+                },
+                "*"
+            );
+
+        }
+
+    }
+);
+
+
+// ============================================================
+// 初期化
+// ============================================================
+
+window.parent.postMessage(
+    {
+        isStreamlitMessage: true,
+
+        type:
+            "streamlit:componentReady",
+
+        apiVersion: 1
+    },
+    "*"
+);
+
+</script>
+
+</body>
+
+</html>
