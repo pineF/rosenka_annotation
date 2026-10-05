@@ -408,6 +408,7 @@ if uploaded_image is not None:
 
                 # 入力リセット
                 st.session_state.current_points = []
+                st.session_state.canvas_revision += 1
                 st.rerun()
 
         if st.session_state.editing_id is not None:
