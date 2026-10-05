@@ -1,4 +1,3 @@
-```python
 import streamlit as st
 from streamlit_image_coordinates import streamlit_image_coordinates
 from PIL import Image, ImageDraw
@@ -1060,4 +1059,3 @@ with control_col:
         st.session_state.zoom = 1.0
 
         st.rerun()
-```
