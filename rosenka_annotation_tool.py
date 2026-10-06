@@ -136,18 +136,17 @@ if uploaded_image is not None:
             for ann in st.session_state.annotations:
                 ann_id = ann["id"]
                 pts = [tuple(p) for p in ann["polyline"]]
-                line_color = (
-                    (0, 100, 255)
-                    if st.session_state.editing_id is not None
+                is_editing = (
+                    st.session_state.editing_id is not None
                     and ann_id == st.session_state.editing_id
-                    else (255, 0, 0)
                 )
-                width = 4
+                line_color = (0, 100, 255) if is_editing else (255, 0, 0)
+                width = 4 if is_editing else 2
 
                 if len(pts) > 1:
                     draw.line(pts, fill=line_color, width=width)
                 for pt in pts:
-                    r = 4
+                    r = 4 if is_editing else 2
                     draw.ellipse(
                         [pt[0] - r, pt[1] - r, pt[0] + r, pt[1] + r],
                         fill=line_color,
