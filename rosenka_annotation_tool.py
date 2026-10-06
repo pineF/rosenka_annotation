@@ -488,6 +488,9 @@ if uploaded_image is not None:
                                 st.session_state.current_points = list(
                                     ann["polyline"]
                                 )
+                                st.session_state.canvas_initial_drawing = None
+                                st.session_state.last_canvas_object_signature = None
+                                st.session_state.ignore_next_canvas_event = False
                                 st.rerun()
 
                             if st.button("🗑️ 削除", key=f"del_{ann['id']}"):
