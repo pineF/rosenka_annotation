@@ -26,18 +26,14 @@ def rerun_fragment() -> None:
 
 @st.cache_data(show_spinner=False)
 def load_image(image_bytes: bytes) -> tuple[bytes, int, int]:
-    """Validate and normalize an uploaded image once per file content."""
+    """Validate a PNG once per file content without re-encoding its pixels."""
     with Image.open(io.BytesIO(image_bytes)) as image:
         width, height = image.size
         if width * height > MAX_IMAGE_PIXELS:
             raise ValueError(
                 f"画像の画素数が上限（{MAX_IMAGE_PIXELS:,} pixels）を超えています。"
             )
-        image_rgb = image.convert("RGBA")
-        size = image_rgb.size
-        output = io.BytesIO()
-        image_rgb.save(output, format="PNG")
-    return output.getvalue(), size[0], size[1]
+    return image_bytes, width, height
 
 
 def _bounds_from_world_file(
@@ -198,7 +194,7 @@ st.sidebar.header("📁 ファイル操作 / 設定")
 
 uploaded_image = st.sidebar.file_uploader(
     "1. 路線価図画像をアップロード",
-    type=["png", "jpg", "jpeg", "tif", "tiff"],
+    type=["png"],
 )
 opacity = st.sidebar.slider("画像の透過度", 0.0, 1.0, 0.7, 0.05)
 

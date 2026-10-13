@@ -7,7 +7,7 @@
 
 ### 使い方
 
-1. サイドバーで PNG/JPEG または GeoTIFF をアップロードします。
+1. サイドバーでPNG画像をアップロードします。
 2. ジオリファレンス方法を選びます。
    - **Boundsを入力**: `west, south, east, north` を十進度で入力します。
    - **World file**: `.pgw`、`.jgw`、`.tfw`、`.wld` を画像と一緒に指定します。
