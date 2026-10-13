@@ -1,3 +1,4 @@
+import base64
 import io
 import json
 from typing import Any
@@ -97,8 +98,12 @@ def build_map(
     west, south, east, north = bounds
     center = [(south + north) / 2, (west + east) / 2]
     map_object = folium.Map(location=center, zoom_start=15, control_scale=True)
+    image_data_uri = (
+        "data:image/png;base64,"
+        + base64.b64encode(image_png).decode("ascii")
+    )
     folium.raster_layers.ImageOverlay(
-        image=image_png,
+        image=image_data_uri,
         bounds=[[south, west], [north, east]],
         opacity=opacity,
         interactive=True,
