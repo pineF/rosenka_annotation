@@ -3,4 +3,3 @@ folium
 streamlit-folium
 rasterio
 pypng
-numpy

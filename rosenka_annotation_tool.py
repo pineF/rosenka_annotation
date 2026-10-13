@@ -11,7 +11,6 @@ from streamlit_folium import st_folium
 
 
 IMAGE_TILE_SIZE = 1024
-GEOTIFF_PREVIEW_MAX_DIMENSION = 4096
 
 
 def rerun_fragment() -> None:
@@ -90,14 +89,11 @@ def _png_size(image_bytes: bytes) -> tuple[int, int]:
 
 
 @st.cache_data(show_spinner=False)
-def load_geotiff(
-    image_bytes: bytes,
-) -> tuple[list[dict[str, Any]], int, int, list[float]]:
-    """Create a bounded preview from a GeoTIFF without embedding all source pixels."""
+def geotiff_bounds_wgs84(image_bytes: bytes) -> list[float]:
+    """Read GeoTIFF CRS and bounds, then return bounds in WGS84."""
     try:
-        import numpy as np
         import rasterio
-        from rasterio.enums import Resampling
+        from rasterio.warp import transform_bounds
     except ImportError as error:
         raise ValueError(
             "GeoTIFFの読込には rasterio が必要です。"
@@ -106,59 +102,21 @@ def load_geotiff(
 
     with rasterio.MemoryFile(image_bytes) as memory_file:
         with memory_file.open() as dataset:
-            if dataset.crs is None or dataset.crs.to_epsg() != 4326:
-                raise ValueError("GeoTIFFのCRSはEPSG:4326（WGS84）にしてください。")
-            width, height = dataset.width, dataset.height
-            if dataset.count not in (1, 2, 3, 4):
+            if dataset.crs is None:
+                raise ValueError("GeoTIFFにCRSが設定されていません。")
+            if dataset.crs.to_epsg() not in (4326, 6673):
                 raise ValueError(
-                    "GeoTIFFのバンド数がPNG表示に対応していません（1〜4バンド）。"
+                    "GeoTIFFのCRSはEPSG:4326またはEPSG:6673にしてください。"
                 )
-            bounds = [
+            west, south, east, north = transform_bounds(
+                dataset.crs,
+                "EPSG:4326",
                 dataset.bounds.left,
                 dataset.bounds.bottom,
                 dataset.bounds.right,
                 dataset.bounds.top,
-            ]
-            scale = min(
-                1.0,
-                GEOTIFF_PREVIEW_MAX_DIMENSION / max(width, height),
             )
-            preview_width = max(1, round(width * scale))
-            preview_height = max(1, round(height * scale))
-            image_data = dataset.read(
-                out_shape=(dataset.count, preview_height, preview_width),
-                resampling=Resampling.bilinear,
-            )
-            if image_data.dtype != np.uint8:
-                dtype_max = np.iinfo(image_data.dtype).max
-                image_data = (
-                    np.clip(image_data.astype(np.float32) / dtype_max, 0, 1)
-                    * 255
-                ).astype(np.uint8)
-            if dataset.count == 1:
-                image_data = np.repeat(image_data, 3, axis=0)
-            elif dataset.count == 2:
-                image_data = np.repeat(image_data[:1], 3, axis=0)
-            profile = {
-                "driver": "PNG",
-                "width": preview_width,
-                "height": preview_height,
-                "count": image_data.shape[0],
-                "dtype": "uint8",
-            }
-            with rasterio.MemoryFile() as tile_file:
-                with tile_file.open(**profile) as tile_dataset:
-                    tile_dataset.write(image_data)
-                preview_png = tile_file.read()
-            return [
-                {
-                    "image": preview_png,
-                    "x": 0,
-                    "y": 0,
-                    "width": preview_width,
-                    "height": preview_height,
-                }
-            ], preview_width, preview_height, bounds
+            return [west, south, east, north]
 
 
 def _bounds_from_world_file(
@@ -311,57 +269,23 @@ _init_state()
 st.title("📍 路線価アノテーションツール")
 st.sidebar.header("📁 ファイル操作 / 設定")
 
-image_source = st.sidebar.radio(
-    "1. 表示画像の入力方法",
-    ["GeoTIFF単独（画像＋ジオリファレンス）", "PNG＋座標情報"],
+uploaded_image = st.sidebar.file_uploader(
+    "1. 表示用PNG画像をアップロード",
+    type=["png"],
 )
-uploaded_image = None
-uploaded_geotiff = None
-if image_source == "GeoTIFF単独（画像＋ジオリファレンス）":
-    uploaded_geotiff = st.sidebar.file_uploader(
-        "GeoTIFFをアップロード（EPSG:4326）",
-        type=["tif", "tiff"],
-    )
-else:
-    uploaded_image = st.sidebar.file_uploader(
-        "PNG画像をアップロード",
-        type=["png"],
-    )
+uploaded_geotiff = st.sidebar.file_uploader(
+    "2. ジオリファレンス用GeoTIFFをアップロード",
+    type=["tif", "tiff"],
+)
 opacity = st.sidebar.slider("画像の透過度", 0.0, 1.0, 0.7, 0.05)
 
-st.sidebar.markdown("### ジオリファレンス（EPSG:4326）")
-georef_type = None
+st.sidebar.markdown("### ジオリファレンス")
 georef_bounds: list[float] | None = None
-if image_source == "PNG＋座標情報":
-    georef_type = st.sidebar.radio(
-        "座標情報の入力方法",
-        ["Boundsを入力", "World fileをアップロード"],
-    )
-    if georef_type == "Boundsを入力":
-        west = st.sidebar.number_input("西端（Longitude）", value=139.0, format="%.8f")
-        south = st.sidebar.number_input("南端（Latitude）", value=35.0, format="%.8f")
-        east = st.sidebar.number_input("東端（Longitude）", value=139.1, format="%.8f")
-        north = st.sidebar.number_input("北端（Latitude）", value=35.1, format="%.8f")
-        georef_bounds = [west, south, east, north]
-    else:
-        georef_file = st.sidebar.file_uploader(
-            "World file",
-            type=["pgw", "jgw", "tfw", "wld"],
-        )
-        if uploaded_image is not None and georef_file is not None:
-            try:
-                image_bytes = uploaded_image.getvalue()
-                width, height = _png_size(image_bytes)
-                georef_bounds = _bounds_from_world_file(
-                    georef_file.getvalue(), width, height
-                )
-            except (ValueError, OSError) as error:
-                st.sidebar.error(f"ジオリファレンス読込エラー: {error}")
-
-if image_source == "GeoTIFF単独（画像＋ジオリファレンス）":
-    georef_bounds = None
-else:
-    georef_file = None
+if uploaded_image is not None and uploaded_geotiff is not None:
+    try:
+        georef_bounds = geotiff_bounds_wgs84(uploaded_geotiff.getvalue())
+    except (ValueError, OSError) as error:
+        st.sidebar.error(f"GeoTIFF読込エラー: {error}")
 
 uploaded_json = st.sidebar.file_uploader(
     "2. 既存JSON/GeoJSONを読み込み", type=["json", "geojson"]
@@ -406,34 +330,18 @@ if uploaded_json is not None and st.sidebar.button("データを読み込んで�
     except (ValueError, KeyError, json.JSONDecodeError) as error:
         st.sidebar.error(f"JSON/GeoJSON読み込みエラー: {error}")
 
-if uploaded_geotiff is not None:
-    try:
-        image_tiles, orig_w, orig_h, georef_bounds = load_geotiff(
-            uploaded_geotiff.getvalue()
-        )
-        st.info(
-            f"GeoTIFFは地図表示用に最大{GEOTIFF_PREVIEW_MAX_DIMENSION}pxへ縮小しています。"
-            f"元画像: {orig_w:,} × {orig_h:,} pixels"
-        )
-    except (OSError, ValueError) as error:
-        st.error(f"GeoTIFF読込エラー: {error}")
-        st.stop()
-elif uploaded_image is not None:
+if uploaded_image is not None:
     try:
         image_tiles, orig_w, orig_h = load_image(uploaded_image.getvalue())
     except (OSError, ValueError) as error:
         st.error(f"画像読込エラー: {error}")
         st.stop()
 else:
-    st.info("👈 表示画像をサイドバーからアップロードしてください。")
+    st.info("👈 PNG画像とジオリファレンス用GeoTIFFをアップロードしてください。")
     st.stop()
 
 if georef_bounds is None:
-    st.warning("PNGの場合はBoundsまたはWorld fileを指定してください。")
-    st.stop()
-
-if not georef_bounds:
-    st.warning("ジオリファレンス情報を指定すると地図を表示できます。")
+    st.warning("PNG画像とGeoTIFFの両方を指定すると地図を表示できます。")
     st.stop()
 
 west, south, east, north = georef_bounds
