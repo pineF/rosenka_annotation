@@ -4,16 +4,13 @@ import json
 from typing import Any
 
 import folium
+import png
 import streamlit as st
-from PIL import Image
 from streamlit.errors import StreamlitInvalidLayoutContextError
 from streamlit_folium import st_folium
 
 
-MAX_IMAGE_PIXELS = 500_000_000
-# Large map sheets can legitimately exceed Pillow's conservative default.
-# The application still enforces its own explicit memory guard below.
-Image.MAX_IMAGE_PIXELS = None
+IMAGE_TILE_SIZE = 1024
 
 
 def rerun_fragment() -> None:
@@ -25,15 +22,66 @@ def rerun_fragment() -> None:
 
 
 @st.cache_data(show_spinner=False)
-def load_image(image_bytes: bytes) -> tuple[bytes, int, int]:
-    """Validate a PNG once per file content without re-encoding its pixels."""
-    with Image.open(io.BytesIO(image_bytes)) as image:
-        width, height = image.size
-        if width * height > MAX_IMAGE_PIXELS:
-            raise ValueError(
-                f"画像の画素数が上限（{MAX_IMAGE_PIXELS:,} pixels）を超えています。"
+def load_image(
+    image_bytes: bytes,
+) -> tuple[list[dict[str, Any]], int, int]:
+    """Read a large PNG row-by-row and return independent image overlay tiles."""
+    reader = png.Reader(bytes=image_bytes)
+    width, height, rows, metadata = reader.read()
+    if metadata.get("bitdepth") != 8:
+        raise ValueError("8ビットPNGのみ対応しています。")
+    greyscale = bool(metadata.get("greyscale"))
+    alpha = bool(metadata.get("alpha"))
+    channels = (2 if alpha else 1) if greyscale else (4 if alpha else 3)
+    tile_rows = min(IMAGE_TILE_SIZE, height)
+    tiles: list[dict[str, Any]] = []
+    tile_buffers = [
+        bytearray()
+        for _ in range((width + IMAGE_TILE_SIZE - 1) // IMAGE_TILE_SIZE)
+    ]
+
+    for row_index, row in enumerate(rows):
+        row_bytes = bytes(row)
+        for tile_index, buffer in enumerate(tile_buffers):
+            start = tile_index * IMAGE_TILE_SIZE * channels
+            end = min((tile_index + 1) * IMAGE_TILE_SIZE, width) * channels
+            buffer.extend(row_bytes[start:end])
+
+        if (row_index + 1) % tile_rows != 0 and row_index + 1 != height:
+            continue
+
+        tile_height = row_index + 1 - (row_index // tile_rows) * tile_rows
+        for tile_index, buffer in enumerate(tile_buffers):
+            tile_width = min(IMAGE_TILE_SIZE, width - tile_index * IMAGE_TILE_SIZE)
+            output = io.BytesIO()
+            tile_row_size = tile_width * channels
+            tile_rows_data = [
+                bytes(buffer[offset : offset + tile_row_size])
+                for offset in range(0, len(buffer), tile_row_size)
+            ]
+            png.Writer(
+                tile_width,
+                tile_height,
+                greyscale=greyscale,
+                alpha=alpha,
+            ).write(output, tile_rows_data)
+            tiles.append(
+                {
+                    "image": output.getvalue(),
+                    "x": tile_index * IMAGE_TILE_SIZE,
+                    "y": row_index + 1 - tile_height,
+                    "width": tile_width,
+                    "height": tile_height,
+                }
             )
-    return image_bytes, width, height
+            buffer.clear()
+
+    return tiles, width, height
+
+
+def _png_size(image_bytes: bytes) -> tuple[int, int]:
+    width, height, _, _ = png.Reader(bytes=image_bytes).read()
+    return width, height
 
 
 def _bounds_from_world_file(
@@ -97,7 +145,9 @@ def _feature_to_annotation(geometry: dict[str, Any], annotation_id: int) -> dict
 
 @st.cache_data(show_spinner=False)
 def build_map(
-    image_png: bytes,
+    image_tiles: list[dict[str, Any]],
+    image_width: int,
+    image_height: int,
     bounds: tuple[float, float, float, float],
     opacity: float,
     annotations_json: str,
@@ -105,18 +155,27 @@ def build_map(
     west, south, east, north = bounds
     center = [(south + north) / 2, (west + east) / 2]
     map_object = folium.Map(location=center, zoom_start=15, control_scale=True)
-    image_data_uri = (
-        "data:image/png;base64,"
-        + base64.b64encode(image_png).decode("ascii")
-    )
-    folium.raster_layers.ImageOverlay(
-        image=image_data_uri,
-        bounds=[[south, west], [north, east]],
-        opacity=opacity,
-        interactive=True,
-        cross_origin=False,
-        zindex=1,
-    ).add_to(map_object)
+    for tile in image_tiles:
+        tile_west = west + (east - west) * tile["x"] / image_width
+        tile_east = west + (east - west) * (
+            tile["x"] + tile["width"]
+        ) / image_width
+        tile_north = north - (north - south) * tile["y"] / image_height
+        tile_south = north - (north - south) * (
+            tile["y"] + tile["height"]
+        ) / image_height
+        image_data_uri = (
+            "data:image/png;base64,"
+            + base64.b64encode(tile["image"]).decode("ascii")
+        )
+        folium.raster_layers.ImageOverlay(
+            image=image_data_uri,
+            bounds=[[tile_south, tile_west], [tile_north, tile_east]],
+            opacity=opacity,
+            interactive=True,
+            cross_origin=False,
+            zindex=1,
+        ).add_to(map_object)
 
     annotations = json.loads(annotations_json)
     feature_collection = {
@@ -222,12 +281,7 @@ else:
     ):
         try:
             image_bytes = uploaded_image.getvalue()
-            with Image.open(io.BytesIO(image_bytes)) as image:
-                width, height = image.size
-            if width * height > MAX_IMAGE_PIXELS:
-                raise ValueError(
-                    f"画像の画素数が上限（{MAX_IMAGE_PIXELS:,} pixels）を超えています。"
-                )
+            width, height = _png_size(image_bytes)
             if georef_type == "World fileをアップロード":
                 if georef_file is None:
                     raise ValueError("World fileをアップロードしてください。")
@@ -297,7 +351,7 @@ if not west < east or not south < north:
     st.stop()
 
 try:
-    image_png, orig_w, orig_h = load_image(uploaded_image.getvalue())
+    image_tiles, orig_w, orig_h = load_image(uploaded_image.getvalue())
 except (OSError, ValueError) as error:
     st.error(f"画像読込エラー: {error}")
     st.stop()
@@ -305,7 +359,9 @@ except (OSError, ValueError) as error:
 st.session_state.json_load_warning = None
 annotations_json = json.dumps(st.session_state.annotations, ensure_ascii=False, sort_keys=True)
 map_object = build_map(
-    image_png,
+    image_tiles,
+    orig_w,
+    orig_h,
     (west, south, east, north),
     opacity,
     annotations_json,
