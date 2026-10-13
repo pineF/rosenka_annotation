@@ -10,6 +10,12 @@ from streamlit.errors import StreamlitInvalidLayoutContextError
 from streamlit_folium import st_folium
 
 
+MAX_IMAGE_PIXELS = 500_000_000
+# Large map sheets can legitimately exceed Pillow's conservative default.
+# The application still enforces its own explicit memory guard below.
+Image.MAX_IMAGE_PIXELS = None
+
+
 def rerun_fragment() -> None:
     """Use a fragment rerun where supported, with a safe fallback."""
     try:
@@ -22,6 +28,11 @@ def rerun_fragment() -> None:
 def load_image(image_bytes: bytes) -> tuple[bytes, int, int]:
     """Validate and normalize an uploaded image once per file content."""
     with Image.open(io.BytesIO(image_bytes)) as image:
+        width, height = image.size
+        if width * height > MAX_IMAGE_PIXELS:
+            raise ValueError(
+                f"画像の画素数が上限（{MAX_IMAGE_PIXELS:,} pixels）を超えています。"
+            )
         image_rgb = image.convert("RGBA")
         size = image_rgb.size
         output = io.BytesIO()
@@ -217,6 +228,10 @@ else:
             image_bytes = uploaded_image.getvalue()
             with Image.open(io.BytesIO(image_bytes)) as image:
                 width, height = image.size
+            if width * height > MAX_IMAGE_PIXELS:
+                raise ValueError(
+                    f"画像の画素数が上限（{MAX_IMAGE_PIXELS:,} pixels）を超えています。"
+                )
             if georef_type == "World fileをアップロード":
                 if georef_file is None:
                     raise ValueError("World fileをアップロードしてください。")
