@@ -7,11 +7,12 @@
 
 ### 使い方
 
-1. サイドバーでPNG画像をアップロードします。
+1. サイドバーで表示画像の入力方法を選びます。
+   - **GeoTIFF単独**: GeoTIFFから画像、Bounds、CRSを取得します。PNGは不要です。
+   - **PNG＋座標情報**: PNGを表示し、BoundsまたはWorld fileを指定します。
 2. ジオリファレンス方法を選びます。
    - **Boundsを入力**: `west, south, east, north` を十進度で入力します。
    - **World file**: `.pgw`、`.jgw`、`.tfw`、`.wld` を画像と一緒に指定します。
-   - **GeoTIFFから自動取得**: EPSG:4326 の GeoTIFF を指定します。
 3. 透過度を調整し、Folium の Draw ツールでポリラインを描画します。
 4. 路線価・記号などを入力して登録し、サイドバーから `annotations.geojson` を
    ダウンロードします。GeoJSON の座標は `[longitude, latitude]` です。
