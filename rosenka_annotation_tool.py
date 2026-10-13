@@ -11,6 +11,7 @@ from streamlit_folium import st_folium
 
 
 IMAGE_TILE_SIZE = 1024
+GEOTIFF_PREVIEW_MAX_DIMENSION = 4096
 
 
 def rerun_fragment() -> None:
@@ -92,10 +93,11 @@ def _png_size(image_bytes: bytes) -> tuple[int, int]:
 def load_geotiff(
     image_bytes: bytes,
 ) -> tuple[list[dict[str, Any]], int, int, list[float]]:
-    """Read a georeferenced TIFF in windows and return overlay tiles."""
+    """Create a bounded preview from a GeoTIFF without embedding all source pixels."""
     try:
+        import numpy as np
         import rasterio
-        from rasterio.windows import Window
+        from rasterio.enums import Resampling
     except ImportError as error:
         raise ValueError(
             "GeoTIFFの読込には rasterio が必要です。"
@@ -117,35 +119,46 @@ def load_geotiff(
                 dataset.bounds.right,
                 dataset.bounds.top,
             ]
-            tiles: list[dict[str, Any]] = []
-            for y in range(0, height, IMAGE_TILE_SIZE):
-                for x in range(0, width, IMAGE_TILE_SIZE):
-                    tile_width = min(IMAGE_TILE_SIZE, width - x)
-                    tile_height = min(IMAGE_TILE_SIZE, height - y)
-                    window = Window(x, y, tile_width, tile_height)
-                    tile_data = dataset.read(window=window)
-                    profile = {
-                        "driver": "PNG",
-                        "width": tile_width,
-                        "height": tile_height,
-                        "count": dataset.count,
-                        "dtype": dataset.dtypes[0],
-                    }
-                    output = io.BytesIO()
-                    with rasterio.MemoryFile() as tile_file:
-                        with tile_file.open(**profile) as tile_dataset:
-                            tile_dataset.write(tile_data)
-                        output.write(tile_file.read())
-                    tiles.append(
-                        {
-                            "image": output.getvalue(),
-                            "x": x,
-                            "y": y,
-                            "width": tile_width,
-                            "height": tile_height,
-                        }
-                    )
-            return tiles, width, height, bounds
+            scale = min(
+                1.0,
+                GEOTIFF_PREVIEW_MAX_DIMENSION / max(width, height),
+            )
+            preview_width = max(1, round(width * scale))
+            preview_height = max(1, round(height * scale))
+            image_data = dataset.read(
+                out_shape=(dataset.count, preview_height, preview_width),
+                resampling=Resampling.bilinear,
+            )
+            if image_data.dtype != np.uint8:
+                dtype_max = np.iinfo(image_data.dtype).max
+                image_data = (
+                    np.clip(image_data.astype(np.float32) / dtype_max, 0, 1)
+                    * 255
+                ).astype(np.uint8)
+            if dataset.count == 1:
+                image_data = np.repeat(image_data, 3, axis=0)
+            elif dataset.count == 2:
+                image_data = np.repeat(image_data[:1], 3, axis=0)
+            profile = {
+                "driver": "PNG",
+                "width": preview_width,
+                "height": preview_height,
+                "count": image_data.shape[0],
+                "dtype": "uint8",
+            }
+            with rasterio.MemoryFile() as tile_file:
+                with tile_file.open(**profile) as tile_dataset:
+                    tile_dataset.write(image_data)
+                preview_png = tile_file.read()
+            return [
+                {
+                    "image": preview_png,
+                    "x": 0,
+                    "y": 0,
+                    "width": preview_width,
+                    "height": preview_height,
+                }
+            ], preview_width, preview_height, bounds
 
 
 def _bounds_from_world_file(
@@ -397,6 +410,10 @@ if uploaded_geotiff is not None:
     try:
         image_tiles, orig_w, orig_h, georef_bounds = load_geotiff(
             uploaded_geotiff.getvalue()
+        )
+        st.info(
+            f"GeoTIFFは地図表示用に最大{GEOTIFF_PREVIEW_MAX_DIMENSION}pxへ縮小しています。"
+            f"元画像: {orig_w:,} × {orig_h:,} pixels"
         )
     except (OSError, ValueError) as error:
         st.error(f"GeoTIFF読込エラー: {error}")

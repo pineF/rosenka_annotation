@@ -17,6 +17,8 @@
 4. 路線価・記号などを入力して登録し、サイドバーから `annotations.geojson` を
    ダウンロードします。GeoJSON の座標は `[longitude, latitude]` です。
 
-GeoTIFF の自動読込には `rasterio` が必要です。大きなPNGは行単位で読み込み、
+GeoTIFF の自動読込には `rasterio` が必要です。大きなGeoTIFFは地図表示用に
+最大4096ピクセルのプレビューへ縮小してから表示するため、Streamlit Cloudでも
+メモリ使用量を抑えられます。大きなPNGは行単位で読み込み、
 1024ピクセル四方のタイルに分割します。依存関係は
 `pip install -r requirements.txt` でインストールできます。
