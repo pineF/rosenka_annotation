@@ -28,24 +28,25 @@ def load_image(
     """Read a large PNG row-by-row and return independent image overlay tiles."""
     reader = png.Reader(bytes=image_bytes)
     width, height, rows, metadata = reader.read()
-    if metadata.get("bitdepth") != 8:
-        raise ValueError("8ビットPNGのみ対応しています。")
+    bitdepth = int(metadata.get("bitdepth", 8))
+    if bitdepth not in (8, 16):
+        raise ValueError("8ビットまたは16ビットPNGのみ対応しています。")
     greyscale = bool(metadata.get("greyscale"))
     alpha = bool(metadata.get("alpha"))
     channels = (2 if alpha else 1) if greyscale else (4 if alpha else 3)
     tile_rows = min(IMAGE_TILE_SIZE, height)
     tiles: list[dict[str, Any]] = []
     tile_buffers = [
-        bytearray()
+        []
         for _ in range((width + IMAGE_TILE_SIZE - 1) // IMAGE_TILE_SIZE)
     ]
 
     for row_index, row in enumerate(rows):
-        row_bytes = bytes(row)
+        row_values = list(row)
         for tile_index, buffer in enumerate(tile_buffers):
             start = tile_index * IMAGE_TILE_SIZE * channels
             end = min((tile_index + 1) * IMAGE_TILE_SIZE, width) * channels
-            buffer.extend(row_bytes[start:end])
+            buffer.extend(row_values[start:end])
 
         if (row_index + 1) % tile_rows != 0 and row_index + 1 != height:
             continue
@@ -56,12 +57,13 @@ def load_image(
             output = io.BytesIO()
             tile_row_size = tile_width * channels
             tile_rows_data = [
-                bytes(buffer[offset : offset + tile_row_size])
+                buffer[offset : offset + tile_row_size]
                 for offset in range(0, len(buffer), tile_row_size)
             ]
             png.Writer(
                 tile_width,
                 tile_height,
+                bitdepth=bitdepth,
                 greyscale=greyscale,
                 alpha=alpha,
             ).write(output, tile_rows_data)
