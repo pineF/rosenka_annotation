@@ -1,534 +1,422 @@
+import io
 import json
+from typing import Any
+
+import folium
 import streamlit as st
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image
 from streamlit.errors import StreamlitInvalidLayoutContextError
-from streamlit_drawable_canvas import st_canvas
+from streamlit_folium import st_folium
 
 
-def rerun_canvas() -> None:
-    """Use a fast fragment rerun, with a safe fallback after a full rerun."""
+def rerun_fragment() -> None:
+    """Use a fragment rerun where supported, with a safe fallback."""
     try:
         st.rerun(scope="fragment")
     except StreamlitInvalidLayoutContextError:
         st.rerun()
 
 
-def canvas_signature(objects: list[dict]) -> tuple[object, ...]:
-    if not objects:
-        return (0, None, None)
-    last_obj = objects[-1]
-    return (len(objects), last_obj.get("left"), last_obj.get("top"))
+@st.cache_data(show_spinner=False)
+def load_image(image_bytes: bytes) -> tuple[bytes, int, int]:
+    """Validate and normalize an uploaded image once per file content."""
+    with Image.open(io.BytesIO(image_bytes)) as image:
+        image_rgb = image.convert("RGBA")
+        size = image_rgb.size
+        output = io.BytesIO()
+        image_rgb.save(output, format="PNG")
+    return output.getvalue(), size[0], size[1]
 
 
-# ------------------------------------------------------------------------------
-# 1. ページ初期設定 & セッション状態の初期化
-# ------------------------------------------------------------------------------
-st.set_page_config(
-    page_title="路線価アノテーションツール", layout="wide", initial_sidebar_state="expanded"
-)
+def _bounds_from_world_file(
+    world_file_bytes: bytes, width: int, height: int
+) -> list[float]:
+    values = [
+        float(line.strip())
+        for line in world_file_bytes.decode("utf-8-sig").splitlines()
+        if line.strip()
+    ]
+    if len(values) != 6:
+        raise ValueError("World file は6行（A,D,B,E,C,F）で指定してください。")
 
-if "annotations" not in st.session_state:
-    st.session_state.annotations = []  # アノテーションリスト
-if "current_points" not in st.session_state:
-    st.session_state.current_points = []  # 現在描画中のポリライン（元画像座標系 [[x, y], ...]）
-if "editing_id" not in st.session_state:
-    st.session_state.editing_id = None  # 修正中のアノテーションID
-if "next_id" not in st.session_state:
-    st.session_state.next_id = 1  # 新規アノテーションIDカウンタ
-if "json_load_warning" not in st.session_state:
-    st.session_state.json_load_warning = None
-if "last_canvas_object_signature" not in st.session_state:
-    st.session_state.last_canvas_object_signature = None
-if "canvas_initial_drawing" not in st.session_state:
-    st.session_state.canvas_initial_drawing = None
-if "ignore_next_canvas_event" not in st.session_state:
-    st.session_state.ignore_next_canvas_event = False
+    a, d, b, e, c, f = values
+    corners = [
+        (c + a * col + b * row, f + d * col + e * row)
+        for col, row in ((0, 0), (width, 0), (0, height), (width, height))
+    ]
+    west = min(point[0] for point in corners)
+    east = max(point[0] for point in corners)
+    south = min(point[1] for point in corners)
+    north = max(point[1] for point in corners)
+    return [west, south, east, north]
 
-st.title("📍 路線価アノテーションツール")
 
-# ------------------------------------------------------------------------------
-# 2. サイドバー：画像・JSONのアップロード、JSONダウンロード
-# ------------------------------------------------------------------------------
-st.sidebar.header("📁 ファイル操作 / 設定")
+def _bounds_from_geotiff(image_bytes: bytes) -> list[float]:
+    try:
+        import rasterio
+    except ImportError as error:
+        raise ValueError(
+            "GeoTIFFの自動読込には rasterio が必要です。"
+            " requirements.txt の依存関係をインストールしてください。"
+        ) from error
 
-# 画像アップロード
-uploaded_image = st.sidebar.file_uploader(
-    "1. 路線価図画像をアップロード", type=["png", "jpg", "jpeg"]
-)
+    with rasterio.MemoryFile(image_bytes) as memory_file:
+        with memory_file.open() as dataset:
+            if dataset.crs is None or dataset.crs.to_epsg() != 4326:
+                raise ValueError("GeoTIFFのCRSはEPSG:4326（WGS84）にしてください。")
+            bounds = dataset.bounds
+            return [bounds.left, bounds.bottom, bounds.right, bounds.top]
 
-st.sidebar.markdown("---")
 
-# JSONの読み込み機能
-uploaded_json = st.sidebar.file_uploader("2. 既存JSONを読み込み", type=["json"])
-if uploaded_json is not None:
-    if st.sidebar.button("JSONデータを読み込んで復元"):
-        try:
-            data = json.load(uploaded_json)
-            loaded_annotations = data.get("annotations", [])
-            if not isinstance(loaded_annotations, list):
-                raise ValueError("annotations は配列である必要があります。")
-            st.session_state.annotations = loaded_annotations
-
-            # 次のIDの決定
-            if loaded_annotations:
-                max_id = max(ann.get("id", 0) for ann in loaded_annotations)
-                st.session_state.next_id = max_id + 1
-            else:
-                st.session_state.next_id = 1
-
-            # 画像サイズのチェック
-            st.session_state.json_load_warning = None
-            if uploaded_image is not None:
-                img_temp = Image.open(uploaded_image)
-                w_orig, h_orig = img_temp.size
-                if data.get("image_width") != w_orig or data.get(
-                    "image_height"
-                ) != h_orig:
-                    st.session_state.json_load_warning = (
-                        "⚠️ 警告: JSON内の画像サイズとアップロード中の画像サイズが異なります。"
-                    )
-
-            st.sidebar.success(
-                f"JSONをロードしました。（{len(loaded_annotations)}件）"
-            )
-            st.rerun()
-        except Exception as e:
-            st.sidebar.error(f"JSON読み込みエラー: {e}")
-
-st.sidebar.markdown("---")
-
-# 画像がロードされている場合のみ動作
-if uploaded_image is not None:
-    # 画像取得と元サイズ保持
-    image_original = Image.open(uploaded_image).convert("RGB")
-    orig_w, orig_h = image_original.size
-    image_name = uploaded_image.name
-    if st.session_state.json_load_warning:
-        st.warning(st.session_state.json_load_warning)
-
-    # --------------------------------------------------------------------------
-    # 4. メインレイアウト（左：画像・描画領域 / 右：属性入力 & データ管理）
-    # --------------------------------------------------------------------------
-    col_canvas, col_form = st.columns([7, 5])
-
-    with col_canvas:
-        st.subheader("🖼️ 画像描画エリア")
-        st.caption(
-            "画像上をクリックしてポリラインを作成します。（ズーム時はスクロールして閲覧可能）"
-        )
-
-        @st.fragment
-        def render_canvas():
-            zoom_percent = st.slider(
-                "画像表示倍率 (%)",
-                min_value=10,
-                max_value=300,
-                value=100,
-                step=10,
-                key="zoom_slider",
-            )
-            zoom_scale = zoom_percent / 100.0
-            disp_w = int(orig_w * zoom_scale)
-            disp_h = int(orig_h * zoom_scale)
-
-            canvas_bg_orig = image_original.copy()
-            draw = ImageDraw.Draw(canvas_bg_orig)
-            font = ImageFont.load_default()
-
-            for ann in st.session_state.annotations:
-                ann_id = ann["id"]
-                pts = [tuple(p) for p in ann["polyline"]]
-                is_editing = (
-                    st.session_state.editing_id is not None
-                    and ann_id == st.session_state.editing_id
-                )
-                line_color = (0, 100, 255) if is_editing else (255, 0, 0)
-                width = 4 if is_editing else 2
-
-                if len(pts) > 1:
-                    draw.line(pts, fill=line_color, width=width)
-                for pt in pts:
-                    r = 4 if is_editing else 2
-                    draw.ellipse(
-                        [pt[0] - r, pt[1] - r, pt[0] + r, pt[1] + r],
-                        fill=line_color,
-                        outline=(255, 255, 255),
-                    )
-                if pts:
-                    draw.text(
-                        (pts[0][0] + 8, pts[0][1] - 8),
-                        f"ID:{ann_id}",
-                        fill=(255, 0, 0),
-                        font=font,
-                    )
-
-            if st.session_state.current_points:
-                curr_pts = [tuple(p) for p in st.session_state.current_points]
-                current_color = (
-                    (0, 100, 255)
-                    if st.session_state.editing_id is not None
-                    else (0, 200, 0)
-                )
-                if len(curr_pts) > 1:
-                    draw.line(curr_pts, fill=current_color, width=4)
-                for pt in curr_pts:
-                    r = 4
-                    draw.ellipse(
-                        [pt[0] - r, pt[1] - r, pt[0] + r, pt[1] + r],
-                        fill=current_color,
-                        outline=(0, 0, 0),
-                    )
-
-            canvas_bg_resized = canvas_bg_orig.resize(
-                (disp_w, disp_h), Image.Resampling.LANCZOS
-            )
-            with st.container(height=700, border=True):
-                canvas_result = st_canvas(
-                    fill_color="rgba(255, 165, 0, 0.3)",
-                    stroke_width=2,
-                    stroke_color="#000000",
-                    background_image=canvas_bg_resized,
-                    initial_drawing=st.session_state.canvas_initial_drawing,
-                    update_streamlit=True,
-                    height=disp_h,
-                    width=disp_w,
-                    drawing_mode="point",
-                    key=f"canvas_{zoom_percent}_{st.session_state.editing_id}",
-                )
-
-            canvas_objects = (
-                canvas_result.json_data.get("objects", [])
-                if canvas_result.json_data
-                else []
-            )
-            if st.session_state.ignore_next_canvas_event:
-                st.session_state.ignore_next_canvas_event = False
-            elif canvas_result.json_data and canvas_result.json_data.get("objects"):
-                last_obj = canvas_objects[-1]
-                object_signature = canvas_signature(canvas_objects)
-                if (
-                    object_signature
-                    == st.session_state.last_canvas_object_signature
-                ):
-                    object_signature = None
-                if object_signature is None:
-                    last_obj = None
-                else:
-                    st.session_state.last_canvas_object_signature = (
-                        object_signature
-                    )
-                if last_obj is None:
-                    pass
-                else:
-                    orig_x = int(round(last_obj["left"] / zoom_scale))
-                    orig_y = int(round(last_obj["top"] / zoom_scale))
-                    point = [orig_x, orig_y]
-                    if (
-                        not st.session_state.current_points
-                        or st.session_state.current_points[-1] != point
-                    ):
-                        st.session_state.current_points.append(point)
-                        rerun_canvas()
-
-            c_btn1, c_btn2 = st.columns(2)
-            with c_btn1:
-                if st.button("↩️ 1つ戻す（最後の点を削除）"):
-                    if st.session_state.current_points:
-                        st.session_state.current_points.pop()
-                    st.session_state.canvas_initial_drawing = {
-                        "version": "5.2.4",
-                        "objects": canvas_objects[:-1],
-                    }
-                    st.session_state.last_canvas_object_signature = (
-                        canvas_signature(canvas_objects[:-1])
-                    )
-                    st.session_state.ignore_next_canvas_event = True
-                    rerun_canvas()
-            with c_btn2:
-                if st.button("🗑️ すべてクリア"):
-                    st.session_state.current_points = []
-                    st.session_state.canvas_initial_drawing = {
-                        "version": "5.2.4",
-                        "objects": [],
-                    }
-                    st.session_state.last_canvas_object_signature = (
-                        canvas_signature([])
-                    )
-                    st.session_state.ignore_next_canvas_event = True
-                    rerun_canvas()
-
-            st.write(
-                f"**現在のポリライン点数**: {len(st.session_state.current_points)} 点"
-            )
-            if st.session_state.current_points:
-                st.json(st.session_state.current_points)
-
-        render_canvas()
-
-    with col_form:
-        st.subheader(
-            "📝 アノテーション入力"
-            if st.session_state.editing_id is None
-            else f"✏️ アノテーション修正 (ID: {st.session_state.editing_id})"
-        )
-
-        # 左右定義ガイド表示
-        st.info(
-            """
-        **左右の定義**（始点から終点へ向かって見たときの左右）:  
-        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **左側**  
-        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ↓  
-        **始点** ●────────────● **終点**  
-        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ↑  
-        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; **右側**
-        """
-        )
-
-        # 修正モード時の初期値設定
-        default_price = 0
-        default_symbol = ""
-        default_shape = "なし"
-        default_l_pattern = "なし"
-        default_r_pattern = "なし"
-
-        if st.session_state.editing_id is not None:
-            edit_item = next(
-                (
-                    item
-                    for item in st.session_state.annotations
-                    if item["id"] == st.session_state.editing_id
-                ),
-                None,
-            )
-            if edit_item:
-                default_price = int(edit_item.get("land_price", 0))
-                default_symbol = edit_item.get("symbol", "")
-                mark_info = edit_item.get("mark", {})
-                default_shape = mark_info.get("shape", "なし")
-                default_l_pattern = mark_info.get("left_pattern", "なし")
-                default_r_pattern = mark_info.get("right_pattern", "なし")
-
-        # 入力フォーム
-        form_key = (
-            f"annotation_form_edit_{st.session_state.editing_id}"
-            if st.session_state.editing_id is not None
-            else "annotation_form_new"
-        )
-        with st.form(form_key):
-            land_price = st.number_input(
-                "路線価（必須・数値）", min_value=0, value=default_price, step=1000
-            )
-
-            symbol_raw = st.text_input(
-                "記号 (A～Gの1文字)",
-                value=default_symbol,
-                max_chars=1,
-                help="小文字は自動で大文字化されます",
-            )
-
-            shape_options = [
-                "六角形",
-                "楕円",
-                "八角形",
-                "正円",
-                "縦に潰れたひし形",
-                "横長の長方形",
-                "なし",
-            ]
-            shape_idx = (
-                shape_options.index(default_shape)
-                if default_shape in shape_options
-                else 6
-            )
-            shape = st.selectbox("マーク形状", shape_options, index=shape_idx)
-
-            pattern_options = ["斜線", "黒塗り", "なし"]
-
-            l_idx = (
-                pattern_options.index(default_l_pattern)
-                if default_l_pattern in pattern_options
-                else 2
-            )
-            left_pattern = st.selectbox(
-                "左側模様", pattern_options, index=l_idx
-            )
-
-            r_idx = (
-                pattern_options.index(default_r_pattern)
-                if default_r_pattern in pattern_options
-                else 2
-            )
-            right_pattern = st.selectbox(
-                "右側模様", pattern_options, index=r_idx
-            )
-
-            btn_label = (
-                "登録"
-                if st.session_state.editing_id is None
-                else "修正を保存"
-            )
-            submitted = st.form_submit_button(btn_label)
-
-        # 登録・保存処理
-        if submitted:
-            symbol = symbol_raw.strip().upper()
-            valid = True
-
-            # バリデーションチェック
-            if len(st.session_state.current_points) < 2:
-                st.error(
-                    "❌ ポリラインは2点以上指定する必要があります（クリックして点を追加してください）。"
-                )
-                valid = False
-
-            if land_price <= 0:
-                st.error("❌ 路線価を入力してください（0より大きい数値）。")
-                valid = False
-
-            if symbol not in ["A", "B", "C", "D", "E", "F", "G"]:
-                st.error("❌ 記号は A～G の1文字である必要があります。")
-                valid = False
-
-            if valid:
-                pts = st.session_state.current_points
-                start_pt = pts[0]
-                end_pt = pts[-1]
-
-                annotation_data = {
-                    "id": (
-                        st.session_state.editing_id
-                        if st.session_state.editing_id is not None
-                        else st.session_state.next_id
-                    ),
-                    "start": start_pt,
-                    "end": end_pt,
-                    "polyline": pts,
-                    "land_price": land_price,
-                    "symbol": symbol,
-                    "mark": {
-                        "shape": shape,
-                        "left_pattern": left_pattern,
-                        "right_pattern": right_pattern,
-                    },
-                }
-
-                if st.session_state.editing_id is not None:
-                    # 修正適用
-                    idx = next(
-                        i
-                        for i, a in enumerate(st.session_state.annotations)
-                        if a["id"] == st.session_state.editing_id
-                    )
-                    st.session_state.annotations[idx] = annotation_data
-                    st.success(
-                        f"ID:{st.session_state.editing_id} のアノテーションを更新しました！"
-                    )
-                    st.session_state.editing_id = None
-                else:
-                    # 新規追加
-                    st.session_state.annotations.append(annotation_data)
-                    st.session_state.next_id += 1
-                    st.success("アノテーションを登録しました！")
-
-                # 入力リセット
-                st.session_state.current_points = []
-                st.session_state.canvas_initial_drawing = {
-                    "version": "5.2.4",
-                    "objects": [],
-                }
-                st.session_state.last_canvas_object_signature = None
-                st.session_state.ignore_next_canvas_event = True
-                # キャンバスを再生成するとスクロール位置が失われるため、
-                # 登録時は同じキャンバスを再利用する。
-                st.rerun()
-
-        if st.session_state.editing_id is not None:
-            if st.button("❌ 修正をキャンセル"):
-                st.session_state.editing_id = None
-                st.session_state.current_points = []
-                st.rerun()
-
-        st.markdown("---")
-
-        # ----------------------------------------------------------------------
-        # 5. 登録済みアノテーション一覧表示 & 修正/削除ボタン
-        # ----------------------------------------------------------------------
-        count = len(st.session_state.annotations)
-        st.subheader(f"📋 登録済みアノテーション（{count}件）")
-
-        # スクロール可能領域の構成
-        with st.container(height=350, border=True):
-            if count == 0:
-                st.info("登録済みのデータはありません。")
-            else:
-                for ann in st.session_state.annotations:
-                    with st.expander(
-                        f"ID: {ann['id']} | 路線価: {ann['land_price']} | 記号: {ann['symbol']}",
-                        expanded=False,
-                    ):
-                        col_a, col_b = st.columns([3, 2])
-                        with col_a:
-                            st.write(f"**ID**: {ann['id']}")
-                            st.write(f"**路線価**: {ann['land_price']}")
-                            st.write(f"**記号**: {ann['symbol']}")
-                            st.write(f"**形状**: {ann['mark']['shape']}")
-                            st.write(
-                                f"**左側模様**: {ann['mark']['left_pattern']}"
-                            )
-                            st.write(
-                                f"**右側模様**: {ann['mark']['right_pattern']}"
-                            )
-                            st.write(f"**始点**: {ann['start']}")
-                            st.write(f"**終点**: {ann['end']}")
-                            st.write(
-                                f"**ポリライン点数**: {len(ann['polyline'])} 点"
-                            )
-
-                        with col_b:
-                            if st.button("✏️ 修正", key=f"edit_{ann['id']}"):
-                                st.session_state.editing_id = ann["id"]
-                                st.session_state.current_points = list(
-                                    ann["polyline"]
-                                )
-                                st.session_state.canvas_initial_drawing = None
-                                st.session_state.last_canvas_object_signature = None
-                                st.session_state.ignore_next_canvas_event = False
-                                st.rerun()
-
-                            if st.button("🗑️ 削除", key=f"del_{ann['id']}"):
-                                st.session_state.annotations = [
-                                    a
-                                    for a in st.session_state.annotations
-                                    if a["id"] != ann["id"]
-                                ]
-                                if (
-                                    st.session_state.editing_id == ann["id"]
-                                ):  # 修正中のものが削除された場合
-                                    st.session_state.editing_id = None
-                                    st.session_state.current_points = []
-                                st.rerun()
-
-    # --------------------------------------------------------------------------
-    # 6. JSON保存ボタン（サイドバーまたは最下部）
-    # --------------------------------------------------------------------------
-    st.sidebar.markdown("---")
-    output_json_data = {
-        "image_name": image_name,
-        "image_width": orig_w,
-        "image_height": orig_h,
-        "annotations": st.session_state.annotations,
+def _feature_to_annotation(geometry: dict[str, Any], annotation_id: int) -> dict[str, Any]:
+    coordinates = geometry.get("coordinates", [])
+    if geometry.get("type") == "Polygon":
+        coordinates = coordinates[0] if coordinates else []
+    if geometry.get("type") != "LineString" or len(coordinates) < 2:
+        raise ValueError("ポリラインを2点以上含むジオメトリを描画してください。")
+    points = [[float(point[1]), float(point[0])] for point in coordinates]
+    return {
+        "id": annotation_id,
+        "geometry": {"type": "LineString", "coordinates": coordinates},
+        "start": points[0],
+        "end": points[-1],
+        "polyline": points,
+        "land_price": 0,
+        "symbol": "",
+        "mark": {"shape": "なし", "left_pattern": "なし", "right_pattern": "なし"},
     }
 
-    json_str = json.dumps(output_json_data, ensure_ascii=False, indent=2)
 
-    st.sidebar.download_button(
-        label="💾 JSONとして保存（ダウンロード）",
-        data=json_str,
-        file_name="annotations.json",
-        mime="application/json",
-    )
+@st.cache_data(show_spinner=False)
+def build_map(
+    image_png: bytes,
+    bounds: tuple[float, float, float, float],
+    opacity: float,
+    annotations_json: str,
+) -> folium.Map:
+    west, south, east, north = bounds
+    center = [(south + north) / 2, (west + east) / 2]
+    map_object = folium.Map(location=center, zoom_start=15, control_scale=True)
+    folium.raster_layers.ImageOverlay(
+        image=image_png,
+        bounds=[[south, west], [north, east]],
+        opacity=opacity,
+        interactive=True,
+        cross_origin=False,
+        zindex=1,
+    ).add_to(map_object)
 
+    annotations = json.loads(annotations_json)
+    feature_collection = {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "properties": {
+                    "id": annotation["id"],
+                    "land_price": annotation.get("land_price", 0),
+                    "symbol": annotation.get("symbol", ""),
+                },
+                "geometry": annotation["geometry"],
+            }
+            for annotation in annotations
+            if annotation.get("geometry")
+        ],
+    }
+    if feature_collection["features"]:
+        folium.GeoJson(
+            feature_collection,
+            name="保存済みアノテーション",
+            style_function=lambda _: {
+                "color": "#ff0000",
+                "weight": 4,
+                "opacity": 0.9,
+            },
+            tooltip=folium.GeoJsonTooltip(
+                fields=["id", "land_price", "symbol"],
+                aliases=["ID", "路線価", "記号"],
+            ),
+        ).add_to(map_object)
+
+    folium.LayerControl().add_to(map_object)
+    from folium.plugins import Draw
+
+    Draw(
+        export=False,
+        position="topleft",
+        draw_options={
+            "polyline": True,
+            "polygon": False,
+            "rectangle": False,
+            "circle": False,
+            "circlemarker": False,
+            "marker": False,
+        },
+        edit_options={"edit": False, "remove": True},
+    ).add_to(map_object)
+    return map_object
+
+
+def _init_state() -> None:
+    defaults = {
+        "annotations": [],
+        "editing_id": None,
+        "next_id": 1,
+        "pending_geometry": None,
+        "json_load_warning": None,
+        "last_drawing_signature": None,
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+
+st.set_page_config(
+    page_title="路線価アノテーションツール",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+_init_state()
+st.title("📍 路線価アノテーションツール")
+st.sidebar.header("📁 ファイル操作 / 設定")
+
+uploaded_image = st.sidebar.file_uploader(
+    "1. 路線価図画像をアップロード",
+    type=["png", "jpg", "jpeg", "tif", "tiff"],
+)
+opacity = st.sidebar.slider("画像の透過度", 0.0, 1.0, 0.7, 0.05)
+
+st.sidebar.markdown("### ジオリファレンス（EPSG:4326）")
+georef_type = st.sidebar.radio(
+    "座標情報の入力方法",
+    ["Boundsを入力", "World fileをアップロード", "GeoTIFFから自動取得"],
+)
+georef_bounds: list[float] | None = None
+if georef_type == "Boundsを入力":
+    west = st.sidebar.number_input("西端（Longitude）", value=139.0, format="%.8f")
+    south = st.sidebar.number_input("南端（Latitude）", value=35.0, format="%.8f")
+    east = st.sidebar.number_input("東端（Longitude）", value=139.1, format="%.8f")
+    north = st.sidebar.number_input("北端（Latitude）", value=35.1, format="%.8f")
+    georef_bounds = [west, south, east, north]
 else:
-    st.info(
-        "👈 左側のサイドバーから路線価図の画像ファイルをアップロードしてください。"
+    georef_file = st.sidebar.file_uploader(
+        "World file / GeoTIFF（GeoTIFF方式では画像ファイルを使用可）",
+        type=["pgw", "jgw", "tfw", "wld", "tif", "tiff"]
+        if georef_type == "World fileをアップロード"
+        else ["tif", "tiff"],
     )
+    if uploaded_image is not None and (
+        georef_file is not None or georef_type == "GeoTIFFから自動取得"
+    ):
+        try:
+            image_bytes = uploaded_image.getvalue()
+            with Image.open(io.BytesIO(image_bytes)) as image:
+                width, height = image.size
+            if georef_type == "World fileをアップロード":
+                if georef_file is None:
+                    raise ValueError("World fileをアップロードしてください。")
+                georef_bounds = _bounds_from_world_file(
+                    georef_file.getvalue(), width, height
+                )
+            else:
+                geotiff_bytes = (
+                    georef_file.getvalue()
+                    if georef_file is not None
+                    else image_bytes
+                )
+                georef_bounds = _bounds_from_geotiff(geotiff_bytes)
+        except (ValueError, OSError) as error:
+            st.sidebar.error(f"ジオリファレンス読込エラー: {error}")
+
+uploaded_json = st.sidebar.file_uploader("2. 既存JSON/GeoJSONを読み込み", type=["json", "geojson"])
+if uploaded_json is not None and st.sidebar.button("データを読み込んで復元"):
+    try:
+        data = json.load(uploaded_json)
+        loaded_annotations = data.get("annotations", [])
+        if data.get("type") == "FeatureCollection":
+            loaded_annotations = [
+                {
+                    "id": feature["properties"].get("id", index + 1),
+                    "geometry": feature["geometry"],
+                    "land_price": feature["properties"].get("land_price", 0),
+                    "symbol": feature["properties"].get("symbol", ""),
+                    "mark": feature["properties"].get("mark", {}),
+                    "start": [
+                        feature["geometry"]["coordinates"][0][1],
+                        feature["geometry"]["coordinates"][0][0],
+                    ],
+                    "end": [
+                        feature["geometry"]["coordinates"][-1][1],
+                        feature["geometry"]["coordinates"][-1][0],
+                    ],
+                    "polyline": [
+                        [point[1], point[0]]
+                        for point in feature["geometry"]["coordinates"]
+                    ],
+                }
+                for index, feature in enumerate(data.get("features", []))
+            ]
+        if not isinstance(loaded_annotations, list):
+            raise ValueError("annotations は配列である必要があります。")
+        st.session_state.annotations = loaded_annotations
+        st.session_state.next_id = (
+            max((annotation.get("id", 0) for annotation in loaded_annotations), default=0)
+            + 1
+        )
+        st.session_state.pending_geometry = None
+        st.sidebar.success(f"データをロードしました。（{len(loaded_annotations)}件）")
+        st.rerun()
+    except (ValueError, KeyError, json.JSONDecodeError) as error:
+        st.sidebar.error(f"JSON/GeoJSON読み込みエラー: {error}")
+
+if uploaded_image is None:
+    st.info("👈 左側のサイドバーから画像ファイルをアップロードしてください。")
+    st.stop()
+if georef_bounds is None:
+    st.warning("画像とジオリファレンス情報を指定すると地図を表示できます。")
+    st.stop()
+west, south, east, north = georef_bounds
+if not west < east or not south < north:
+    st.error("Boundsは west < east かつ south < north になるよう指定してください。")
+    st.stop()
+
+try:
+    image_png, orig_w, orig_h = load_image(uploaded_image.getvalue())
+except (OSError, ValueError) as error:
+    st.error(f"画像読込エラー: {error}")
+    st.stop()
+
+st.session_state.json_load_warning = None
+annotations_json = json.dumps(st.session_state.annotations, ensure_ascii=False, sort_keys=True)
+map_object = build_map(
+    image_png,
+    (west, south, east, north),
+    opacity,
+    annotations_json,
+)
+map_data = st_folium(
+    map_object,
+    height=700,
+    width=None,
+    key="annotation_map",
+    returned_objects=["last_active_drawing"],
+)
+active_drawing = map_data.get("last_active_drawing") if map_data else None
+if active_drawing and active_drawing.get("geometry"):
+    signature = json.dumps(active_drawing["geometry"], sort_keys=True)
+    if signature != st.session_state.last_drawing_signature:
+        st.session_state.pending_geometry = active_drawing["geometry"]
+        st.session_state.last_drawing_signature = signature
+
+col_form, col_list = st.columns([4, 5])
+with col_form:
+    st.subheader(
+        "📝 アノテーション入力"
+        if st.session_state.editing_id is None
+        else f"✏️ アノテーション修正 (ID: {st.session_state.editing_id})"
+    )
+    geometry = st.session_state.pending_geometry
+    if st.session_state.editing_id is not None:
+        edit_item = next(
+            item
+            for item in st.session_state.annotations
+            if item["id"] == st.session_state.editing_id
+        )
+        geometry = edit_item["geometry"]
+    if geometry is None:
+        st.info("地図上のDrawツールでポリラインを描画してください。")
+
+    edit_item = next(
+        (
+            item
+            for item in st.session_state.annotations
+            if item["id"] == st.session_state.editing_id
+        ),
+        {},
+    )
+    mark = edit_item.get("mark", {})
+    with st.form("annotation_form"):
+        land_price = st.number_input(
+            "路線価（必須・数値）", min_value=0, value=int(edit_item.get("land_price", 0)), step=1000
+        )
+        symbol = st.text_input(
+            "記号 (A～Gの1文字)",
+            value=edit_item.get("symbol", ""),
+            max_chars=1,
+        ).strip().upper()
+        shape = st.selectbox(
+            "マーク形状",
+            ["六角形", "楕円", "八角形", "正円", "縦に潰れたひし形", "横長の長方形", "なし"],
+            index=["六角形", "楕円", "八角形", "正円", "縦に潰れたひし形", "横長の長方形", "なし"].index(
+                mark.get("shape", "なし")
+            )
+            if mark.get("shape", "なし") in ["六角形", "楕円", "八角形", "正円", "縦に潰れたひし形", "横長の長方形", "なし"]
+            else 6,
+        )
+        left_pattern = st.selectbox("左側模様", ["斜線", "黒塗り", "なし"], index=["斜線", "黒塗り", "なし"].index(mark.get("left_pattern", "なし")) if mark.get("left_pattern", "なし") in ["斜線", "黒塗り", "なし"] else 2)
+        right_pattern = st.selectbox("右側模様", ["斜線", "黒塗り", "なし"], index=["斜線", "黒塗り", "なし"].index(mark.get("right_pattern", "なし")) if mark.get("right_pattern", "なし") in ["斜線", "黒塗り", "なし"] else 2)
+        submitted = st.form_submit_button("修正を保存" if st.session_state.editing_id else "登録")
+
+    if submitted:
+        if not geometry or geometry.get("type") != "LineString" or len(geometry.get("coordinates", [])) < 2:
+            st.error("❌ 地図上で2点以上のポリラインを描画してください。")
+        elif land_price <= 0 or symbol not in list("ABCDEFG"):
+            st.error("❌ 路線価は0より大きく、記号はA～Gの1文字で指定してください。")
+        else:
+            annotation = _feature_to_annotation(geometry, st.session_state.editing_id or st.session_state.next_id)
+            annotation.update({
+                "land_price": land_price,
+                "symbol": symbol,
+                "mark": {"shape": shape, "left_pattern": left_pattern, "right_pattern": right_pattern},
+            })
+            if st.session_state.editing_id is None:
+                st.session_state.annotations.append(annotation)
+                st.session_state.next_id += 1
+            else:
+                index = next(i for i, item in enumerate(st.session_state.annotations) if item["id"] == st.session_state.editing_id)
+                st.session_state.annotations[index] = annotation
+                st.session_state.editing_id = None
+            st.session_state.pending_geometry = None
+            st.session_state.last_drawing_signature = None
+            st.rerun()
+
+with col_list:
+    st.subheader(f"📋 登録済みアノテーション（{len(st.session_state.annotations)}件）")
+    for annotation in st.session_state.annotations:
+        with st.expander(f"ID: {annotation['id']} | 路線価: {annotation['land_price']} | 記号: {annotation['symbol']}"):
+            st.write(f"**始点 (Lat, Lon)**: {annotation['start']}")
+            st.write(f"**終点 (Lat, Lon)**: {annotation['end']}")
+            edit_col, delete_col = st.columns(2)
+            if edit_col.button("✏️ 修正", key=f"edit_{annotation['id']}"):
+                st.session_state.editing_id = annotation["id"]
+                st.session_state.pending_geometry = annotation["geometry"]
+                st.rerun()
+            if delete_col.button("🗑️ 削除", key=f"delete_{annotation['id']}"):
+                st.session_state.annotations = [
+                    item for item in st.session_state.annotations if item["id"] != annotation["id"]
+                ]
+                st.rerun()
+
+st.sidebar.markdown("---")
+geojson_data = {
+    "type": "FeatureCollection",
+    "features": [
+        {
+            "type": "Feature",
+            "properties": {
+                "id": annotation["id"],
+                "land_price": annotation["land_price"],
+                "symbol": annotation["symbol"],
+                "mark": annotation["mark"],
+            },
+            "geometry": annotation["geometry"],
+        }
+        for annotation in st.session_state.annotations
+    ],
+}
+st.sidebar.download_button(
+    "💾 GeoJSONとして保存（緯度経度）",
+    data=json.dumps(geojson_data, ensure_ascii=False, indent=2),
+    file_name="annotations.geojson",
+    mime="application/geo+json",
+)

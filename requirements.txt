@@ -1,4 +1,5 @@
 streamlit
-streamlit-drawable-canvas
+folium
+streamlit-folium
 Pillow
-numpy
+rasterio
