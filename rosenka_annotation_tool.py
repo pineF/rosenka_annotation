@@ -29,11 +29,12 @@ def load_image(
     reader = png.Reader(bytes=image_bytes)
     width, height, rows, metadata = reader.read()
     bitdepth = int(metadata.get("bitdepth", 8))
-    if bitdepth not in (8, 16):
-        raise ValueError("8ビットまたは16ビットPNGのみ対応しています。")
-    greyscale = bool(metadata.get("greyscale"))
+    if bitdepth not in (1, 2, 4, 8, 16):
+        raise ValueError("PNGのビット深度（1/2/4/8/16）に対応していません。")
+    palette = metadata.get("palette")
+    greyscale = bool(metadata.get("greyscale")) and palette is None
     alpha = bool(metadata.get("alpha"))
-    channels = (2 if alpha else 1) if greyscale else (4 if alpha else 3)
+    channels = (2 if alpha else 1) if greyscale else 1 if palette else (4 if alpha else 3)
     tile_rows = min(IMAGE_TILE_SIZE, height)
     tiles: list[dict[str, Any]] = []
     tile_buffers = [
@@ -66,6 +67,7 @@ def load_image(
                 bitdepth=bitdepth,
                 greyscale=greyscale,
                 alpha=alpha,
+                palette=palette,
             ).write(output, tile_rows_data)
             tiles.append(
                 {
