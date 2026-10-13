@@ -47,7 +47,7 @@ if "ignore_next_canvas_event" not in st.session_state:
 st.title("📍 路線価アノテーションツール")
 
 # ------------------------------------------------------------------------------
-# 2. サイドバー：画像・JSONのアップロード、拡大縮小、JSONダウンロード
+# 2. サイドバー：画像・JSONのアップロード、JSONダウンロード
 # ------------------------------------------------------------------------------
 st.sidebar.header("📁 ファイル操作 / 設定")
 
@@ -55,12 +55,6 @@ st.sidebar.header("📁 ファイル操作 / 設定")
 uploaded_image = st.sidebar.file_uploader(
     "1. 路線価図画像をアップロード", type=["png", "jpg", "jpeg"]
 )
-
-# ズーム倍率設定（デフォルト 100%）
-zoom_percent = st.sidebar.slider(
-    "画像表示倍率 (%)", min_value=10, max_value=300, value=100, step=10
-)
-zoom_scale = zoom_percent / 100.0
 
 st.sidebar.markdown("---")
 
@@ -112,10 +106,6 @@ if uploaded_image is not None:
     if st.session_state.json_load_warning:
         st.warning(st.session_state.json_load_warning)
 
-    # 表示用サイズ
-    disp_w = int(orig_w * zoom_scale)
-    disp_h = int(orig_h * zoom_scale)
-
     # --------------------------------------------------------------------------
     # 4. メインレイアウト（左：画像・描画領域 / 右：属性入力 & データ管理）
     # --------------------------------------------------------------------------
@@ -129,6 +119,18 @@ if uploaded_image is not None:
 
         @st.fragment
         def render_canvas():
+            zoom_percent = st.slider(
+                "画像表示倍率 (%)",
+                min_value=10,
+                max_value=300,
+                value=100,
+                step=10,
+                key="zoom_slider",
+            )
+            zoom_scale = zoom_percent / 100.0
+            disp_w = int(orig_w * zoom_scale)
+            disp_h = int(orig_h * zoom_scale)
+
             canvas_bg_orig = image_original.copy()
             draw = ImageDraw.Draw(canvas_bg_orig)
             font = ImageFont.load_default()
