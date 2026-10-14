@@ -11,6 +11,7 @@ from streamlit_folium import st_folium
 
 
 IMAGE_TILE_SIZE = 1024
+IMAGE_PREVIEW_MAX_DIMENSION = 4096
 
 
 def rerun_fragment() -> None:
@@ -25,7 +26,7 @@ def rerun_fragment() -> None:
 def load_image(
     image_bytes: bytes,
 ) -> tuple[list[dict[str, Any]], int, int]:
-    """Read a large PNG row-by-row and return independent image overlay tiles."""
+    """Stream a PNG and create one bounded preview for the map overlay."""
     reader = png.Reader(bytes=image_bytes)
     width, height, rows, metadata = reader.read()
     bitdepth = int(metadata.get("bitdepth", 8))
@@ -34,53 +35,56 @@ def load_image(
     palette = metadata.get("palette")
     greyscale = bool(metadata.get("greyscale")) and palette is None
     alpha = bool(metadata.get("alpha"))
-    channels = (2 if alpha else 1) if greyscale else 1 if palette else (4 if alpha else 3)
-    tile_rows = min(IMAGE_TILE_SIZE, height)
-    tiles: list[dict[str, Any]] = []
-    tile_buffers = [
-        []
-        for _ in range((width + IMAGE_TILE_SIZE - 1) // IMAGE_TILE_SIZE)
-    ]
+    source_channels = (
+        (2 if alpha else 1)
+        if greyscale
+        else 1 if palette else (4 if alpha else 3)
+    )
+    scale = max(
+        1,
+        (width + IMAGE_PREVIEW_MAX_DIMENSION - 1) // IMAGE_PREVIEW_MAX_DIMENSION,
+        (height + IMAGE_PREVIEW_MAX_DIMENSION - 1) // IMAGE_PREVIEW_MAX_DIMENSION,
+    )
+    preview_width = (width + scale - 1) // scale
+    preview_height = (height + scale - 1) // scale
+    preview_rows: list[list[int]] = []
+    source_max = (1 << bitdepth) - 1
 
     for row_index, row in enumerate(rows):
-        row_values = list(row)
-        for tile_index, buffer in enumerate(tile_buffers):
-            start = tile_index * IMAGE_TILE_SIZE * channels
-            end = min((tile_index + 1) * IMAGE_TILE_SIZE, width) * channels
-            buffer.extend(row_values[start:end])
-
-        if (row_index + 1) % tile_rows != 0 and row_index + 1 != height:
+        if row_index % scale != 0:
             continue
+        values = list(row)
+        sampled: list[int] = []
+        for column in range(0, width, scale):
+            start = column * source_channels
+            pixel = values[start : start + source_channels]
+            if palette:
+                sampled.extend(list(palette[pixel[0]][:3]))
+            elif greyscale:
+                value = round(pixel[0] * 255 / source_max)
+                sampled.extend([value, value, value])
+            else:
+                sampled.extend(
+                    round(value * 255 / source_max) for value in pixel[:3]
+                )
+        preview_rows.append(sampled)
 
-        tile_height = row_index + 1 - (row_index // tile_rows) * tile_rows
-        for tile_index, buffer in enumerate(tile_buffers):
-            tile_width = min(IMAGE_TILE_SIZE, width - tile_index * IMAGE_TILE_SIZE)
-            output = io.BytesIO()
-            tile_row_size = tile_width * channels
-            tile_rows_data = [
-                buffer[offset : offset + tile_row_size]
-                for offset in range(0, len(buffer), tile_row_size)
-            ]
-            png.Writer(
-                tile_width,
-                tile_height,
-                bitdepth=bitdepth,
-                greyscale=greyscale,
-                alpha=alpha,
-                palette=palette,
-            ).write(output, tile_rows_data)
-            tiles.append(
-                {
-                    "image": output.getvalue(),
-                    "x": tile_index * IMAGE_TILE_SIZE,
-                    "y": row_index + 1 - tile_height,
-                    "width": tile_width,
-                    "height": tile_height,
-                }
-            )
-            buffer.clear()
-
-    return tiles, width, height
+    output = io.BytesIO()
+    png.Writer(
+        preview_width,
+        preview_height,
+        bitdepth=8,
+        greyscale=False,
+    ).write(output, preview_rows)
+    return [
+        {
+            "image": output.getvalue(),
+            "x": 0,
+            "y": 0,
+            "width": preview_width,
+            "height": preview_height,
+        }
+    ], width, height
 
 
 def _png_size(image_bytes: bytes) -> tuple[int, int]:
@@ -282,13 +286,14 @@ if georef_type == "Boundsを入力":
     south_input = st.sidebar.number_input("南端 / Y最小", value=35.0, format="%.8f")
     east_input = st.sidebar.number_input("東端 / X最大", value=139.1, format="%.8f")
     north_input = st.sidebar.number_input("北端 / Y最大", value=35.1, format="%.8f")
-    try:
-        georef_bounds = transform_bounds_to_wgs84(
-            (west_input, south_input, east_input, north_input),
-            source_crs_code,
-        )
-    except ValueError as error:
-        st.sidebar.error(f"Bounds変換エラー: {error}")
+    if uploaded_image is not None:
+        try:
+            georef_bounds = transform_bounds_to_wgs84(
+                (west_input, south_input, east_input, north_input),
+                source_crs_code,
+            )
+        except ValueError as error:
+            st.sidebar.error(f"Bounds変換エラー: {error}")
 else:
     uploaded_world_file = st.sidebar.file_uploader(
         "World fileをアップロード",
@@ -353,6 +358,10 @@ if uploaded_json is not None and st.sidebar.button("データを読み込んで�
 if uploaded_image is not None:
     try:
         image_tiles, orig_w, orig_h = load_image(uploaded_image.getvalue())
+        st.info(
+            f"PNGは地図表示用に最大{IMAGE_PREVIEW_MAX_DIMENSION}pxへ縮小しています。"
+            f"元画像: {orig_w:,} × {orig_h:,} pixels"
+        )
     except (OSError, ValueError) as error:
         st.error(f"画像読込エラー: {error}")
         st.stop()

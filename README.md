@@ -16,5 +16,5 @@
    ダウンロードします。GeoJSON の座標は `[longitude, latitude]` です。
 
 EPSG:6673からEPSG:4326への変換には `rasterio` が必要です。大きなPNGは
-行単位で読み込み、1024ピクセル四方のタイルに分割します。依存関係は
+行単位で読み込み、地図表示用に最大4096ピクセルへ縮小します。依存関係は
 `pip install -r requirements.txt` でインストールできます。
