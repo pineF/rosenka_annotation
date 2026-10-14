@@ -89,38 +89,26 @@ def _png_size(image_bytes: bytes) -> tuple[int, int]:
 
 
 @st.cache_data(show_spinner=False)
-def geotiff_bounds_wgs84(image_bytes: bytes) -> list[float]:
-    """Read GeoTIFF CRS and bounds, then return bounds in WGS84."""
+def transform_bounds_to_wgs84(
+    bounds: tuple[float, float, float, float], source_crs: str
+) -> list[float]:
+    """Transform four source-CRS bounds into WGS84."""
     try:
-        import rasterio
         from rasterio.warp import transform_bounds
     except ImportError as error:
         raise ValueError(
-            "GeoTIFFの読込には rasterio が必要です。"
+            "EPSG:6673の変換には rasterio が必要です。"
             " requirements.txt の依存関係をインストールしてください。"
         ) from error
 
-    with rasterio.MemoryFile(image_bytes) as memory_file:
-        with memory_file.open() as dataset:
-            if dataset.crs is None:
-                raise ValueError("GeoTIFFにCRSが設定されていません。")
-            if dataset.crs.to_epsg() not in (4326, 6673):
-                raise ValueError(
-                    "GeoTIFFのCRSはEPSG:4326またはEPSG:6673にしてください。"
-                )
-            west, south, east, north = transform_bounds(
-                dataset.crs,
-                "EPSG:4326",
-                dataset.bounds.left,
-                dataset.bounds.bottom,
-                dataset.bounds.right,
-                dataset.bounds.top,
-            )
-            return [west, south, east, north]
+    return list(transform_bounds(source_crs, "EPSG:4326", *bounds))
 
 
 def _bounds_from_world_file(
-    world_file_bytes: bytes, width: int, height: int
+    world_file_bytes: bytes,
+    width: int,
+    height: int,
+    source_crs: str,
 ) -> list[float]:
     values = [
         float(line.strip())
@@ -135,11 +123,13 @@ def _bounds_from_world_file(
         (c + a * col + b * row, f + d * col + e * row)
         for col, row in ((0, 0), (width, 0), (0, height), (width, height))
     ]
-    west = min(point[0] for point in corners)
-    east = max(point[0] for point in corners)
-    south = min(point[1] for point in corners)
-    north = max(point[1] for point in corners)
-    return [west, south, east, north]
+    bounds = (
+        min(point[0] for point in corners),
+        min(point[1] for point in corners),
+        max(point[0] for point in corners),
+        max(point[1] for point in corners),
+    )
+    return transform_bounds_to_wgs84(bounds, source_crs)
 
 
 def _feature_to_annotation(geometry: dict[str, Any], annotation_id: int) -> dict[str, Any]:
@@ -273,19 +263,49 @@ uploaded_image = st.sidebar.file_uploader(
     "1. 表示用PNG画像をアップロード",
     type=["png"],
 )
-uploaded_geotiff = st.sidebar.file_uploader(
-    "2. ジオリファレンス用GeoTIFFをアップロード",
-    type=["tif", "tiff"],
-)
 opacity = st.sidebar.slider("画像の透過度", 0.0, 1.0, 0.7, 0.05)
 
 st.sidebar.markdown("### ジオリファレンス")
 georef_bounds: list[float] | None = None
-if uploaded_image is not None and uploaded_geotiff is not None:
+source_crs = st.sidebar.selectbox(
+    "座標系",
+    ["EPSG:4326（WGS84）", "EPSG:6673（兵庫県など）"],
+)
+source_crs_code = source_crs.split("（", 1)[0]
+georef_type = st.sidebar.radio(
+    "座標情報の入力方法",
+    ["Boundsを入力", "World fileをアップロード"],
+)
+if georef_type == "Boundsを入力":
+    st.sidebar.caption("入力値は選択した座標系の単位です。6673はメートルです。")
+    west_input = st.sidebar.number_input("西端 / X最小", value=139.0, format="%.8f")
+    south_input = st.sidebar.number_input("南端 / Y最小", value=35.0, format="%.8f")
+    east_input = st.sidebar.number_input("東端 / X最大", value=139.1, format="%.8f")
+    north_input = st.sidebar.number_input("北端 / Y最大", value=35.1, format="%.8f")
     try:
-        georef_bounds = geotiff_bounds_wgs84(uploaded_geotiff.getvalue())
-    except (ValueError, OSError) as error:
-        st.sidebar.error(f"GeoTIFF読込エラー: {error}")
+        georef_bounds = transform_bounds_to_wgs84(
+            (west_input, south_input, east_input, north_input),
+            source_crs_code,
+        )
+    except ValueError as error:
+        st.sidebar.error(f"Bounds変換エラー: {error}")
+else:
+    uploaded_world_file = st.sidebar.file_uploader(
+        "World fileをアップロード",
+        type=["pgw", "jgw", "tfw", "wld"],
+    )
+    if uploaded_image is not None and uploaded_world_file is not None:
+        try:
+            image_bytes = uploaded_image.getvalue()
+            width, height = _png_size(image_bytes)
+            georef_bounds = _bounds_from_world_file(
+                uploaded_world_file.getvalue(),
+                width,
+                height,
+                source_crs_code,
+            )
+        except (ValueError, OSError) as error:
+            st.sidebar.error(f"World file読込エラー: {error}")
 
 uploaded_json = st.sidebar.file_uploader(
     "2. 既存JSON/GeoJSONを読み込み", type=["json", "geojson"]
@@ -337,11 +357,11 @@ if uploaded_image is not None:
         st.error(f"画像読込エラー: {error}")
         st.stop()
 else:
-    st.info("👈 PNG画像とジオリファレンス用GeoTIFFをアップロードしてください。")
+    st.info("👈 PNG画像をアップロードしてください。")
     st.stop()
 
 if georef_bounds is None:
-    st.warning("PNG画像とGeoTIFFの両方を指定すると地図を表示できます。")
+    st.warning("BoundsまたはWorld fileを指定すると地図を表示できます。")
     st.stop()
 
 west, south, east, north = georef_bounds
