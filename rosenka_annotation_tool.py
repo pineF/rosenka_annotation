@@ -25,7 +25,7 @@ def rerun_fragment() -> None:
 @st.cache_data(show_spinner=False)
 def load_image(
     image_bytes: bytes,
-) -> tuple[list[dict[str, Any]], int, int]:
+) -> tuple[bytes, int, int]:
     """Stream a PNG and create one bounded preview for the map overlay."""
     reader = png.Reader(bytes=image_bytes)
     width, height, rows, metadata = reader.read()
@@ -76,15 +76,7 @@ def load_image(
         bitdepth=8,
         greyscale=False,
     ).write(output, preview_rows)
-    return [
-        {
-            "image": output.getvalue(),
-            "x": 0,
-            "y": 0,
-            "width": preview_width,
-            "height": preview_height,
-        }
-    ], width, height
+    return output.getvalue(), width, height
 
 
 def _png_size(image_bytes: bytes) -> tuple[int, int]:
@@ -124,7 +116,10 @@ def _bounds_from_world_file(
 
     a, d, b, e, c, f = values
     corners = [
-        (c + a * col + b * row, f + d * col + e * row)
+        (
+            c + a * (col - 0.5) + b * (row - 0.5),
+            f + d * (col - 0.5) + e * (row - 0.5),
+        )
         for col, row in ((0, 0), (width, 0), (0, height), (width, height))
     ]
     bounds = (
@@ -155,11 +150,8 @@ def _feature_to_annotation(geometry: dict[str, Any], annotation_id: int) -> dict
     }
 
 
-@st.cache_data(show_spinner=False)
 def build_map(
-    image_tiles: list[dict[str, Any]],
-    image_width: int,
-    image_height: int,
+    preview_image_bytes: bytes,
     bounds: tuple[float, float, float, float],
     opacity: float,
     annotations_json: str,
@@ -167,27 +159,19 @@ def build_map(
     west, south, east, north = bounds
     center = [(south + north) / 2, (west + east) / 2]
     map_object = folium.Map(location=center, zoom_start=15, control_scale=True)
-    for tile in image_tiles:
-        tile_west = west + (east - west) * tile["x"] / image_width
-        tile_east = west + (east - west) * (
-            tile["x"] + tile["width"]
-        ) / image_width
-        tile_north = north - (north - south) * tile["y"] / image_height
-        tile_south = north - (north - south) * (
-            tile["y"] + tile["height"]
-        ) / image_height
-        image_data_uri = (
-            "data:image/png;base64,"
-            + base64.b64encode(tile["image"]).decode("ascii")
-        )
-        folium.raster_layers.ImageOverlay(
-            image=image_data_uri,
-            bounds=[[tile_south, tile_west], [tile_north, tile_east]],
-            opacity=opacity,
-            interactive=True,
-            cross_origin=False,
-            zindex=1,
-        ).add_to(map_object)
+    map_object.fit_bounds([[south, west], [north, east]])
+    image_data_uri = (
+        "data:image/png;base64,"
+        + base64.b64encode(preview_image_bytes).decode("ascii")
+    )
+    folium.raster_layers.ImageOverlay(
+        image=image_data_uri,
+        bounds=[[south, west], [north, east]],
+        opacity=opacity,
+        interactive=True,
+        cross_origin=False,
+        zindex=1,
+    ).add_to(map_object)
 
     annotations = json.loads(annotations_json)
     feature_collection = {
@@ -357,7 +341,7 @@ if uploaded_json is not None and st.sidebar.button("データを読み込んで�
 
 if uploaded_image is not None:
     try:
-        image_tiles, orig_w, orig_h = load_image(uploaded_image.getvalue())
+        preview_image_bytes, orig_w, orig_h = load_image(uploaded_image.getvalue())
         st.info(
             f"PNGは地図表示用に最大{IMAGE_PREVIEW_MAX_DIMENSION}pxへ縮小しています。"
             f"元画像: {orig_w:,} × {orig_h:,} pixels"
@@ -378,12 +362,17 @@ if not west < east or not south < north:
     st.error("Boundsは west < east かつ south < north になるよう指定してください。")
     st.stop()
 
+# 緯度35度付近での概算距離（m）
+approx_lat_m = (north - south) * 111_000
+approx_lon_m = (east - west) * 91_400
+st.sidebar.caption(
+    f"🗺️ 画像範囲: 東西 約{approx_lon_m/1000:.2f}km × 南北 約{approx_lat_m/1000:.2f}km"
+)
+
 st.session_state.json_load_warning = None
 annotations_json = json.dumps(st.session_state.annotations, ensure_ascii=False, sort_keys=True)
 map_object = build_map(
-    image_tiles,
-    orig_w,
-    orig_h,
+    preview_image_bytes,
     (west, south, east, north),
     opacity,
     annotations_json,
